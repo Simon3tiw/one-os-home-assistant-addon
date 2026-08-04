@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+dist/
+coverage/
+playwright-report/
+test-results/
+
+# Runtime and secrets
+.env
+.env.*
+!.env.example
+*.db
+*.sqlite*
+/data/
+secrets.yaml
+*.pem
+*.key
+*.crt
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
