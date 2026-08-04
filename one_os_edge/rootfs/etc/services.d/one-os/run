@@ -1,0 +1,5 @@
+#!/usr/bin/with-contenv sh
+set -eu
+export DATABASE_URL="sqlite:////data/commissioning.db"
+export INGRESS_PATH="${INGRESS_ENTRY:-}"
+exec uvicorn one_os_addon.app:app --host 0.0.0.0 --port 8099 --no-proxy-headers
