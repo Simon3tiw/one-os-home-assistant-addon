@@ -1,0 +1,16 @@
+name: ONE.OS Edge Connector
+version: "0.1.0"
+slug: one_os_edge
+description: Local read-only Home Assistant discovery and ONE.OS commissioning
+url: https://github.com/Simon3tiw/one-os-home-assistant-addon
+arch:
+  - amd64
+  - aarch64
+init: false
+ingress: true
+panel_icon: mdi:office-building-cog
+panel_title: ONE.OS Commissioning
+homeassistant: "2025.1.0"
+hassio_api: true
+homeassistant_api: true
+backup: cold

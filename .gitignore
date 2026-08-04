@@ -9,24 +9,33 @@ htmlcov/
 
 # Node
 node_modules/
+frontend/node_modules/
 dist/
+frontend/dist/
 coverage/
 playwright-report/
+frontend/playwright-report/
 test-results/
+frontend/test-results/
 
 # Runtime and secrets
 .env
 .env.*
 !.env.example
 *.db
+*.db-*
 *.sqlite*
 /data/
 secrets.yaml
 *.pem
 *.key
 *.crt
+*.log
 
 # Editors / OS
 .DS_Store
 .idea/
 .vscode/
+
+# Release artifacts
+/dist-bundle/

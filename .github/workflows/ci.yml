@@ -1,0 +1,148 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: uv sync --frozen --all-extras
+      - run: uv run ruff check one_os_edge/backend
+      - run: uv run ruff format --check one_os_edge/backend
+      - run: uv run pytest -q
+      - run: uv run pip-audit
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: one_os_edge/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: uv sync --frozen --all-extras
+        working-directory: .
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: one_os_edge/frontend/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run build
+      - run: npm audit --omit=dev --audit-level=high
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+        env:
+          PHASE2A_FAKE_MARKER: ONE_OS_PHASE2A_FAKE
+
+  home-assistant-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: frenck/action-addon-linter@v2.21
+        with:
+          path: one_os_edge
+
+  container:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+          - platform: linux/arm64
+            arch: aarch64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        id: build
+        with:
+          context: one_os_edge
+          file: one_os_edge/Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: false
+          load: false
+          outputs: type=docker,dest=/tmp/one-os-edge-${{ matrix.arch }}.tar
+          tags: one-os-edge:${{ matrix.arch }}
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+      - name: Load image and boot under QEMU
+        run: |
+          set -u
+          docker load --input /tmp/one-os-edge-${{ matrix.arch }}.tar
+          docker run -d --name one-os-smoke --platform ${{ matrix.platform }} \
+            -e SUPERVISOR_TOKEN=smoke-test-token \
+            -e ALLOWED_ORIGINS=http://127.0.0.1:8099 \
+            -p 18099:8099 \
+            one-os-edge:${{ matrix.arch }}
+          healthy=0
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:18099/health; then
+              echo "healthy"
+              healthy=1
+              break
+            fi
+            sleep 2
+          done
+          echo "--- container logs ---"
+          docker logs one-os-smoke || true
+          echo "--- container status ---"
+          docker inspect one-os-smoke --format '{{json .State}}' || true
+          if [ "$healthy" -ne 1 ]; then
+            echo "::error::Container failed to become healthy within timeout"
+            docker stop one-os-smoke || true
+            exit 1
+          fi
+          curl -fsS http://127.0.0.1:18099/health | grep -q '"status":"ok"'
+          docker stop one-os-smoke
+      - name: Compute image digest and SBOM
+        run: |
+          docker sbom one-os-edge:${{ matrix.arch }} > /tmp/one-os-edge-${{ matrix.arch }}.sbom.txt || echo "sbom tool unavailable" > /tmp/one-os-edge-${{ matrix.arch }}.sbom.txt
+          sha256sum /tmp/one-os-edge-${{ matrix.arch }}.tar > /tmp/one-os-edge-${{ matrix.arch }}.tar.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: one-os-edge-image-${{ matrix.arch }}
+          path: |
+            /tmp/one-os-edge-${{ matrix.arch }}.tar
+            /tmp/one-os-edge-${{ matrix.arch }}.tar.sha256
+            /tmp/one-os-edge-${{ matrix.arch }}.sbom.txt
+          retention-days: 14
+
+  release-bundle:
+    runs-on: ubuntu-latest
+    needs: [backend, frontend, home-assistant-lint, container]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build manual-install bundle
+        run: ./scripts/build-release-bundle.sh "$PWD/dist-bundle"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: one-os-edge-addon-bundle
+          path: |
+            dist-bundle/one-os-edge-addon-bundle.tar.gz
+            dist-bundle/one-os-edge-addon-bundle.tar.gz.sha256
+          retention-days: 30
