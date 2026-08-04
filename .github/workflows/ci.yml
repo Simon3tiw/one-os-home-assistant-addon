@@ -32,6 +32,14 @@ jobs:
         working-directory: one_os_edge/frontend
     steps:
       - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: uv sync --frozen --all-extras
+        working-directory: .
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -53,6 +61,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: frenck/action-addon-linter@v2.21
+        with:
+          path: one_os_edge
 
   container:
     runs-on: ubuntu-latest
@@ -82,20 +92,32 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
       - name: Load image and boot under QEMU
         run: |
+          set -u
           docker load --input /tmp/one-os-edge-${{ matrix.arch }}.tar
           docker run -d --name one-os-smoke --platform ${{ matrix.platform }} \
             -e SUPERVISOR_TOKEN=smoke-test-token \
             -e ALLOWED_ORIGINS=http://127.0.0.1:8099 \
+            -p 18099:8099 \
             one-os-edge:${{ matrix.arch }}
-          for i in $(seq 1 30); do
-            if docker exec one-os-smoke wget -qO- http://127.0.0.1:8099/health; then
+          healthy=0
+          for i in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:18099/health; then
               echo "healthy"
+              healthy=1
               break
             fi
             sleep 2
           done
-          docker exec one-os-smoke wget -qO- http://127.0.0.1:8099/health | grep -q '"status":"ok"'
-          docker logs one-os-smoke
+          echo "--- container logs ---"
+          docker logs one-os-smoke || true
+          echo "--- container status ---"
+          docker inspect one-os-smoke --format '{{json .State}}' || true
+          if [ "$healthy" -ne 1 ]; then
+            echo "::error::Container failed to become healthy within timeout"
+            docker stop one-os-smoke || true
+            exit 1
+          fi
+          curl -fsS http://127.0.0.1:18099/health | grep -q '"status":"ok"'
           docker stop one-os-smoke
       - name: Compute image digest and SBOM
         run: |

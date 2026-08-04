@@ -19,6 +19,6 @@ COPY alembic.ini ./
 COPY backend/alembic ./backend/alembic
 COPY --from=ui /src/dist ./static
 COPY rootfs /
-RUN chmod +x /etc/services.d/one-os/run
+RUN mkdir -p /data && chmod +x /etc/services.d/one-os/run
 EXPOSE 8099
 HEALTHCHECK --interval=30s --timeout=3s CMD wget -qO- http://127.0.0.1:8099/health >/dev/null || exit 1
