@@ -340,6 +340,14 @@ def reconcile(db: Session, snapshot: dict, actor="system"):
             db.add(point)
             db.flush()
         else:
+            changed = (
+                point.evidence_hash != ev_hash
+                or point.raw_value != (state or {}).get("state")
+                or point.quality != quality(state)
+                or point.lifecycle in {"missing", "archived"}
+                or (point.asset_id != asset.id and not point.placement_override)
+                or point.placement_conflict != point_placement_conflict
+            )
             if point.evidence_hash and point.evidence_hash != ev_hash:
                 point.cloud_control_enabled = False
                 point.capability_review_required = True
@@ -361,8 +369,11 @@ def reconcile(db: Session, snapshot: dict, actor="system"):
             point.evidence_hash = ev_hash
             point.capability_json = json.dumps(cap)
             if point.lifecycle != "archived":
+                if point.lifecycle == "missing":
+                    changed = True
                 point.lifecycle = "active"
-            point.revision += 1
+            if changed:
+                point.revision += 1
         db.flush()
         record_evidence(db, point, ev_json, ev_hash)
         seen_points.add(key)
@@ -426,6 +437,13 @@ def reconcile(db: Session, snapshot: dict, actor="system"):
                     )
                     db.add(point)
                 else:
+                    changed = (
+                        point.evidence_hash != ev_hash
+                        or point.raw_value != state["state"]
+                        or point.quality != quality(state)
+                        or point.lifecycle in {"missing", "archived"}
+                        or (point.asset_id != asset.id and not point.placement_override)
+                    )
                     if point.evidence_hash and point.evidence_hash != ev_hash:
                         point.cloud_control_enabled = False
                         point.capability_review_required = True
@@ -442,8 +460,11 @@ def reconcile(db: Session, snapshot: dict, actor="system"):
                     point.evidence_json = ev_json
                     point.evidence_hash = ev_hash
                     point.capability_json = json.dumps(cap)
+                    if point.lifecycle == "missing":
+                        changed = True
                     point.lifecycle = "active"
-                    point.revision += 1
+                    if changed:
+                        point.revision += 1
                 db.flush()
                 record_evidence(db, point, ev_json, ev_hash)
                 seen_points.add(key)

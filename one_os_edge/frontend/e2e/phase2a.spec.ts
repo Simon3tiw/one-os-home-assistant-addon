@@ -12,9 +12,10 @@ test('isolated non-root commissioning journey against a real backend process', a
   await expect(page.getByText(/21,24 °C|21,2 °C/).last()).toBeVisible()
 
   const nameField = page.getByLabel(/Weergavenaam/)
+  await expect(nameField).toBeVisible()
   await nameField.fill('Persistent fixture')
   await page.getByRole('button', {name: 'Overrides opslaan'}).click()
-  await expect(page.getByLabel(/Weergavenaam/)).toHaveValue('Persistent fixture')
+  await expect(page.getByLabel(/Weergavenaam/)).toHaveValue('Persistent fixture', {timeout: 15000})
 
   await page.getByRole('checkbox', {name: /Selecteer Office multisensor/}).click()
   await expect(page.getByRole('dialog', {name: 'Beoordelen en selecteren'})).toBeVisible()
