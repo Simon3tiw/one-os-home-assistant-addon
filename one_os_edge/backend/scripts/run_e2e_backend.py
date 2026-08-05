@@ -22,6 +22,21 @@ sys.path.insert(0, str(BACKEND_ROOT))
 from one_os_addon.app import create_app  # noqa: E402
 from one_os_addon.ha.fake import FakeHomeAssistant  # noqa: E402
 
+E2E_CENTRAL_ORIGIN = "https://central.e2e.invalid:8443"
+E2E_CENTRAL_FINGERPRINT = "ab" * 32
+
+
+def e2e_destination_tester(origin: str, fingerprint: str) -> dict[str, str | bool]:
+    """Deterministic network seam; browser/API/database remain real in this process."""
+    if origin != E2E_CENTRAL_ORIGIN or fingerprint != E2E_CENTRAL_FINGERPRINT:
+        raise RuntimeError("unexpected E2E destination configuration")
+    return {
+        "service": "one-os-central",
+        "schemaVersion": "1.0",
+        "pairingSupported": False,
+        "phase": "2B.1-sandbox-foundation",
+    }
+
 
 def main() -> None:
     host = os.environ.get("PHASE2A_HOST", "127.0.0.1")
@@ -45,6 +60,7 @@ def main() -> None:
         allowed_origins={origin},
         start_background_sync=True,
         sync_interval=2,
+        destination_tester=e2e_destination_tester,
     )
     uvicorn.run(app, host=host, port=port, log_level="warning")
 

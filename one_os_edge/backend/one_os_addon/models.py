@@ -179,6 +179,18 @@ class Property(Base):
     revision: Mapped[int] = mapped_column(Integer, default=1)
 
 
+class CentralDestination(Base):
+    __tablename__ = "central_destination"
+    __table_args__ = (CheckConstraint("id = 1", name="ck_central_destination_singleton"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    origin: Mapped[str] = mapped_column(String(2048), nullable=False)
+    certificate_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    configured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=now
+    )
+
+
 class Audit(Base):
     __tablename__ = "audit"
     id: Mapped[str] = mapped_column(String, primary_key=True)

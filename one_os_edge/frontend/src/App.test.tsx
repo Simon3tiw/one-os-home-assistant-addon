@@ -105,7 +105,11 @@ function makeInventory(point = makePoint()) {
   }
 }
 
-function mockApi(point = makePoint(), inventory = makeInventory(point)) {
+function mockApi(
+  point = makePoint(),
+  inventory = makeInventory(point),
+  destinationTestDelay?: Promise<void>,
+) {
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -123,6 +127,40 @@ function mockApi(point = makePoint(), inventory = makeInventory(point)) {
           }),
         )
       if (url.endsWith('/inventory')) return new Response(JSON.stringify(inventory))
+      if (url.endsWith('/central-destination')) {
+        if (method === 'PUT') {
+          const body = JSON.parse(String(init?.body))
+          return new Response(JSON.stringify({
+            configured: true,
+            revision: 1,
+            origin: body.origin,
+            certificateFingerprint: body.certificateFingerprint.replaceAll(':', '').toLowerCase(),
+            configuredAt: '2026-08-05T12:00:00+00:00',
+            status: 'configured',
+          }))
+        }
+        return new Response(JSON.stringify({
+          configured: false,
+          revision: 0,
+          origin: null,
+          certificateFingerprint: null,
+          configuredAt: null,
+          status: 'not_configured',
+        }))
+      }
+      if (url.endsWith('/central-destination/test')) {
+        await destinationTestDelay
+        return new Response(
+          JSON.stringify({
+            status: 'reachable',
+            revision: 1,
+            service: 'one-os-central',
+            schemaVersion: '1.0',
+            pairingSupported: false,
+            phase: '2B.1-sandbox-foundation',
+          }),
+        )
+      }
       if (url.includes('/properties/point/')) {
         if (method === 'POST') {
           const body = JSON.parse(String(init?.body))
@@ -149,10 +187,10 @@ function mockApi(point = makePoint(), inventory = makeInventory(point)) {
         return new Response(
           JSON.stringify({
             schemaVersion: '1.0',
-            softwareVersion: '0.1.6',
+            softwareVersion: '0.2.0',
             architecture: 'amd64',
             installationHash: 'hash',
-            databaseRevision: '0003',
+            databaseRevision: '0004',
             connectorPresence: 'online',
             lastSync: {at: null, status: 'never'},
             counts: inventory.counts,
@@ -523,6 +561,79 @@ describe('commissioning UI', () => {
     render(<App />)
     await u.click(await screen.findByText('Diagnostiek'))
     expect(await screen.findByText('Systeemstatus & audit')).toBeInTheDocument()
-    expect(await screen.findByText('0.1.6')).toBeInTheDocument()
+    expect(await screen.findByText('0.2.0')).toBeInTheDocument()
+  })
+
+  it('configures and tests the pinned ONE.OS Central destination in Dutch', async () => {
+    mockApi()
+    const u = userEvent.setup()
+    render(<App />)
+
+    await u.click(await screen.findByText('ONE.OS Central'))
+    expect(await screen.findByText('Niet geconfigureerd')).toBeInTheDocument()
+    await u.type(screen.getByLabelText('Serveradres'), 'https://central.example:8443')
+    await u.type(screen.getByLabelText('Certificaatfingerprint (SHA-256)'), 'AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA')
+    await u.click(screen.getByRole('button', {name: 'Bestemming opslaan'}))
+
+    expect(await screen.findByText('Geconfigureerd')).toBeInTheDocument()
+    await u.click(screen.getByRole('button', {name: 'Verbinding testen'}))
+    expect(await screen.findByText('Bereikbaar')).toBeInTheDocument()
+
+    const serverAddress = screen.getByLabelText('Serveradres')
+    await u.clear(serverAddress)
+    await u.type(serverAddress, 'https://unsaved.example:8443')
+    expect(await screen.findByText('Niet opgeslagen')).toBeInTheDocument()
+    expect(screen.getByRole('button', {name: 'Verbinding testen'})).toBeDisabled()
+
+    const putCall = vi.mocked(fetch).mock.calls.find(([url, init]) =>
+      String(url).endsWith('/central-destination') && init?.method === 'PUT',
+    )
+    expect(JSON.parse(String(putCall?.[1]?.body))).toMatchObject({
+      revision: 0,
+      origin: 'https://central.example:8443',
+    })
+    expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).includes('/inventory/publish'))).toBe(false)
+  })
+
+  it('locks destination drafts while a connection test is pending', async () => {
+    let releaseTest: () => void = () => {}
+    const pendingTest = new Promise<void>((resolve) => {
+      releaseTest = resolve
+    })
+    const point = makePoint()
+    mockApi(point, makeInventory(point), pendingTest)
+    const u = userEvent.setup()
+    render(<App />)
+
+    await u.click(await screen.findByText('ONE.OS Central'))
+    await u.type(screen.getByLabelText('Serveradres'), 'https://central.example:8443')
+    await u.type(screen.getByLabelText('Certificaatfingerprint (SHA-256)'), 'AA'.repeat(32))
+    await u.click(screen.getByRole('button', {name: 'Bestemming opslaan'}))
+
+    const pendingClick = u.click(screen.getByRole('button', {name: 'Verbinding testen'}))
+    await waitFor(() => expect(screen.getByLabelText('Serveradres')).toBeDisabled())
+    expect(screen.getByLabelText('Certificaatfingerprint (SHA-256)')).toBeDisabled()
+
+    releaseTest()
+    await pendingClick
+    expect(await screen.findByText('Bereikbaar')).toBeInTheDocument()
+    expect(screen.getByLabelText('Serveradres')).not.toBeDisabled()
+  })
+
+  it('uses the authenticated JSON mutation helper for destination PUT', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn()
+        .mockResolvedValueOnce(new Response(JSON.stringify({csrfToken: 'csrf-destination'})))
+        .mockResolvedValueOnce(new Response(JSON.stringify({configured: true, revision: 1}))),
+    )
+    const client = new ApiClient()
+    await client.init()
+    await client.saveCentralDestination(0, 'https://central.example', 'aa'.repeat(32))
+
+    const [, init] = vi.mocked(fetch).mock.calls[1]
+    expect(init?.method).toBe('PUT')
+    expect(new Headers(init?.headers).get('X-CSRF-Token')).toBe('csrf-destination')
+    expect(new Headers(init?.headers).get('Content-Type')).toBe('application/json')
   })
 })

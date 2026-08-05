@@ -8,6 +8,7 @@ import re
 import secrets
 import time
 from contextlib import asynccontextmanager
+from datetime import UTC
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
@@ -17,15 +18,23 @@ from alembic.config import Config
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, field_validator
-from sqlalchemy import create_engine, event, func, select
+from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import create_engine, event, func, insert, select, update
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import sessionmaker
 
+from .central_destination import (
+    DiscoveryError,
+    normalize_fingerprint,
+    test_pinned_discovery,
+    validate_https_origin,
+)
 from .ha.client import HomeAssistantReadOnlyClient
 from .ha.fake import IncompatibleHomeAssistant, UnavailableHomeAssistant
 from .models import (
     Asset,
     Audit,
+    CentralDestination,
     PhysicalDevice,
     Point,
     Property,
@@ -34,6 +43,7 @@ from .models import (
     Space,
     Structure,
     SyncRun,
+    now,
     uid,
 )
 from .reconciliation import infer_ontology_class, reconcile
@@ -99,6 +109,22 @@ class PointPlacementBody(BaseModel):
 
 class RevisionBody(BaseModel):
     revision: int
+
+
+class CentralDestinationBody(BaseModel):
+    revision: int
+    origin: str = Field(max_length=2048)
+    certificateFingerprint: str
+
+    @field_validator("origin")
+    @classmethod
+    def validate_origin(cls, value: str) -> str:
+        return validate_https_origin(value)
+
+    @field_validator("certificateFingerprint")
+    @classmethod
+    def validate_fingerprint(cls, value: str) -> str:
+        return normalize_fingerprint(value)
 
 
 class PropertyCreateBody(BaseModel):
@@ -247,6 +273,29 @@ def property_json(item: Property) -> dict:
         "key": item.key,
         "valueType": item.value_type,
         "value": json.loads(item.value_json),
+    }
+
+
+def central_destination_json(item: CentralDestination | None) -> dict:
+    if item is None:
+        return {
+            "configured": False,
+            "revision": 0,
+            "origin": None,
+            "certificateFingerprint": None,
+            "configuredAt": None,
+            "status": "not_configured",
+        }
+    configured_at = item.configured_at
+    if configured_at.tzinfo is None:
+        configured_at = configured_at.replace(tzinfo=UTC)
+    return {
+        "configured": True,
+        "revision": item.revision,
+        "origin": item.origin,
+        "certificateFingerprint": item.certificate_fingerprint,
+        "configuredAt": configured_at.isoformat(),
+        "status": "configured",
     }
 
 
@@ -412,6 +461,7 @@ def create_app(
     csrf_ttl_seconds=600,
     start_background_sync=False,
     sync_interval=300,
+    destination_tester=None,
 ):
     app = FastAPI(
         title="ONE.OS commissioning API", version="1.0.0", root_path=os.getenv("INGRESS_PATH", "")
@@ -452,6 +502,7 @@ def create_app(
     app.state.csrf_ttl_seconds = csrf_ttl_seconds
     app.state.engine = engine
     app.state.sync = None
+    app.state.destination_tester = destination_tester or test_pinned_discovery
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -551,6 +602,81 @@ def create_app(
                 "phaseNotice": "Cloud pairing and data transport follow in Phase 2B/2C",
                 "database": "healthy",
             }
+
+    @app.get("/api/v1/central-destination")
+    def get_central_destination():
+        with db() as s:
+            return central_destination_json(s.get(CentralDestination, 1))
+
+    @app.put("/api/v1/central-destination")
+    def put_central_destination(body: CentralDestinationBody, request: Request):
+        with db() as s:
+            next_revision = body.revision + 1
+            try:
+                if body.revision == 0:
+                    result = s.execute(
+                        insert(CentralDestination).values(
+                            id=1,
+                            revision=next_revision,
+                            origin=body.origin,
+                            certificate_fingerprint=body.certificateFingerprint,
+                            configured_at=now(),
+                        )
+                    )
+                else:
+                    result = s.execute(
+                        update(CentralDestination)
+                        .where(
+                            CentralDestination.id == 1,
+                            CentralDestination.revision == body.revision,
+                        )
+                        .values(
+                            revision=next_revision,
+                            origin=body.origin,
+                            certificate_fingerprint=body.certificateFingerprint,
+                            configured_at=now(),
+                        )
+                    )
+                if result.rowcount != 1:
+                    s.rollback()
+                    raise HTTPException(409, detail={"code": "revision_conflict"})
+                audit(
+                    s,
+                    request,
+                    "central_destination.configure",
+                    "central_destination",
+                    next_revision,
+                    ["origin", "certificateFingerprint"],
+                )
+                s.commit()
+            except HTTPException:
+                raise
+            except (IntegrityError, OperationalError) as error:
+                s.rollback()
+                raise HTTPException(409, detail={"code": "revision_conflict"}) from error
+            destination = s.get(CentralDestination, 1)
+            return central_destination_json(destination)
+
+    @app.post("/api/v1/central-destination/test")
+    def test_central_destination():
+        with db() as s:
+            destination = s.get(CentralDestination, 1)
+            if destination is None:
+                raise HTTPException(409, detail={"code": "not_configured"})
+            origin = destination.origin
+            fingerprint = destination.certificate_fingerprint
+            tested_revision = destination.revision
+        try:
+            discovery = app.state.destination_tester(origin, fingerprint)
+        except DiscoveryError as error:
+            code = str(error)
+            status_code = 503 if code == "unreachable" else 502
+            raise HTTPException(status_code, detail={"code": code}) from None
+        with db() as s:
+            current = s.get(CentralDestination, 1)
+            if current is None or current.revision != tested_revision:
+                raise HTTPException(409, detail={"code": "revision_conflict"})
+        return {"status": "reachable", "revision": tested_revision, **discovery}
 
     @app.post("/api/v1/reconcile")
     async def run_reconcile(request: Request):
@@ -1153,12 +1279,12 @@ def create_app(
             last = s.scalar(select(SyncRun).order_by(SyncRun.at.desc()))
             return {
                 "schemaVersion": "1.0",
-                "softwareVersion": "0.1.6",
+                "softwareVersion": "0.2.0",
                 "architecture": platform.machine(),
                 "installationHash": hashlib.sha256(
                     (site.installation_id if site else "uninitialized").encode()
                 ).hexdigest(),
-                "databaseRevision": "0003",
+                "databaseRevision": "0004",
                 "connectorPresence": app.state.ha.connector_presence,
                 "lastSync": {
                     "at": last.at.isoformat() if last else None,

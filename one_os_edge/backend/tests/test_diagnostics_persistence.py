@@ -102,7 +102,7 @@ def test_diagnostics_is_allowlist_only_and_audit_is_safe(client, auth, fake_ha):
         "counts",
         "storage",
     }
-    assert diag.json()["softwareVersion"] == "0.1.6"
+    assert diag.json()["softwareVersion"] == "0.2.0"
     assert "CANARY" not in diag.text and "sensor.room_temperature" not in diag.text
     assert all(
         set(row) <= {"actorId", "at", "action", "objectId", "revision", "fields"}
@@ -291,7 +291,7 @@ def test_cold_backup_restore_preserves_complete_commissioning_state(tmp_path, fa
         } == expected_audit_actions
     restored_app.state.engine.dispose()
     with closing(sqlite3.connect(restored)) as connection:
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0003",)
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0004",)
 
 
 def test_app_database_is_migrated_to_alembic_head(tmp_path, fake_ha):
@@ -304,4 +304,4 @@ def test_app_database_is_migrated_to_alembic_head(tmp_path, fake_ha):
     app = create_app(database_url=f"sqlite:///{database}", ha_client=fake_ha)
     app.state.engine.dispose()
     with closing(sqlite3.connect(database)) as connection:
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0003",)
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0004",)

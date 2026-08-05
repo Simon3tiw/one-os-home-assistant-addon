@@ -1,9 +1,21 @@
 import {useEffect, useMemo, useRef, useState} from 'react'
 import {ApiClient} from './api'
-import type {Asset, AuditEntry, Diagnostics, Inventory, Overview, Point, Property, Space, Structure} from './api'
+import type {
+  Asset,
+  AuditEntry,
+  CentralDestination,
+  Diagnostics,
+  Inventory,
+  Overview,
+  Point,
+  Property,
+  Space,
+  Structure,
+} from './api'
 import {Modal} from './Modal'
 
-type Section = 'overview' | 'inventory' | 'diagnostics'
+type Section = 'overview' | 'inventory' | 'central' | 'diagnostics'
+type CentralStatus = 'not_configured' | 'unsaved' | 'configured' | 'reachable' | 'trust_error' | 'protocol_error' | 'unreachable'
 type SelectionDialog = {kind: 'point' | 'asset' | 'space' | 'structure'; id: string; name: string}
 type ArchiveDialog = {kind: 'assets' | 'spaces' | 'structures'; id: string; name: string; revision: number}
 type SplitDialog = {asset: Asset}
@@ -143,6 +155,10 @@ export function App() {
   const [properties, setProperties] = useState<Property[]>([])
   const [audit, setAudit] = useState<AuditEntry[]>([])
   const [diagnostics, setDiagnostics] = useState<Diagnostics | null>(null)
+  const [centralDestination, setCentralDestination] = useState<CentralDestination | null>(null)
+  const [centralOrigin, setCentralOrigin] = useState('')
+  const [centralFingerprint, setCentralFingerprint] = useState('')
+  const [centralStatus, setCentralStatus] = useState<CentralStatus>('not_configured')
   const [selectionDialog, setSelectionDialog] = useState<SelectionDialog | null>(null)
   const [archiveDialog, setArchiveDialog] = useState<ArchiveDialog | null>(null)
   const [splitDialog, setSplitDialog] = useState<SplitDialog | null>(null)
@@ -194,6 +210,14 @@ export function App() {
       client.diagnostics().then(setDiagnostics).catch(() => {})
       client.audit().then(setAudit).catch(() => {})
     }
+    if (section === 'central') {
+      client.centralDestination().then((destination) => {
+        setCentralDestination(destination)
+        setCentralOrigin(destination.origin ?? '')
+        setCentralFingerprint(destination.certificateFingerprint ?? '')
+        setCentralStatus(destination.configured ? 'configured' : 'not_configured')
+      }).catch((error) => setActionError(String(error)))
+    }
   }, [section, client])
 
   async function refreshInventory(authoritativePoint?: Point) {
@@ -240,6 +264,48 @@ export function App() {
       await refreshInventory()
     } catch (e) {
       setActionError(String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function saveCentralDestination() {
+    setBusy(true)
+    setActionError('')
+    try {
+      const saved = await client.saveCentralDestination(
+        centralDestination?.revision ?? 0,
+        centralOrigin,
+        centralFingerprint,
+      )
+      setCentralDestination(saved)
+      setCentralOrigin(saved.origin ?? '')
+      setCentralFingerprint(saved.certificateFingerprint ?? '')
+      setCentralStatus('configured')
+    } catch (error) {
+      setActionError(String(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function testCentralDestination() {
+    setBusy(true)
+    setActionError('')
+    try {
+      const result = await client.testCentralDestination()
+      setCentralStatus(result.revision === centralDestination?.revision ? 'reachable' : 'configured')
+    } catch (error) {
+      const message = String(error)
+      if (message.includes('revision_conflict')) {
+        setCentralStatus('configured')
+        setActionError('De centrale bestemming is intussen gewijzigd. Laad de pagina opnieuw en test opnieuw.')
+      } else {
+        const status = (['trust_error', 'protocol_error', 'unreachable'] as CentralStatus[]).find((code) =>
+          message.includes(code),
+        )
+        setCentralStatus(status ?? 'protocol_error')
+      }
     } finally {
       setBusy(false)
     }
@@ -456,6 +522,13 @@ export function App() {
             Inventaris &amp; ontologie
           </a>
           <a
+            className={section === 'central' ? 'active' : ''}
+            href="#central"
+            onClick={() => setSection('central')}
+          >
+            ONE.OS Central
+          </a>
+          <a
             className={section === 'diagnostics' ? 'active' : ''}
             href="#diagnostics"
             onClick={() => setSection('diagnostics')}
@@ -464,9 +537,9 @@ export function App() {
           </a>
         </nav>
         <div className="phase">
-          Fase 2A
+          Fase 2B.1
           <br />
-          <small>Alleen lokale commissioning</small>
+          <small>Bestemming configureren; geen inventarispublicatie</small>
         </div>
       </aside>
       <main>
@@ -589,6 +662,25 @@ export function App() {
               onRemoveProperty={removeProperty}
             />
           </section>
+        )}
+        {section === 'central' && (
+          <CentralDestinationPanel
+            destination={centralDestination}
+            origin={centralOrigin}
+            fingerprint={centralFingerprint}
+            status={centralStatus}
+            busy={busy}
+            onOriginChange={(value) => {
+              setCentralOrigin(value)
+              setCentralStatus('unsaved')
+            }}
+            onFingerprintChange={(value) => {
+              setCentralFingerprint(value)
+              setCentralStatus('unsaved')
+            }}
+            onSave={saveCentralDestination}
+            onTest={testCentralDestination}
+          />
         )}
         {section === 'diagnostics' && <DiagnosticsPanel diagnostics={diagnostics} audit={audit} />}
       </main>
@@ -1188,6 +1280,96 @@ function MergeModal({
     </Modal>
   )
 }
+
+function CentralDestinationPanel({
+  destination,
+  origin,
+  fingerprint,
+  status,
+  busy,
+  onOriginChange,
+  onFingerprintChange,
+  onSave,
+  onTest,
+}: {
+  destination: CentralDestination | null
+  origin: string
+  fingerprint: string
+  status: CentralStatus
+  busy: boolean
+  onOriginChange: (value: string) => void
+  onFingerprintChange: (value: string) => void
+  onSave: () => void
+  onTest: () => void
+}) {
+  const labels: Record<CentralStatus, string> = {
+    not_configured: 'Niet geconfigureerd',
+    unsaved: 'Niet opgeslagen',
+    configured: 'Geconfigureerd',
+    reachable: 'Bereikbaar',
+    trust_error: 'Vertrouwensfout',
+    protocol_error: 'Protocolfout',
+    unreachable: 'Niet bereikbaar',
+  }
+  const draftIsPersisted = Boolean(
+    destination?.configured
+    && origin === destination.origin
+    && fingerprint === destination.certificateFingerprint,
+  )
+  const hasDraft = origin !== '' || fingerprint !== ''
+  const effectiveStatus = !draftIsPersisted && hasDraft
+    ? 'unsaved'
+    : draftIsPersisted && status === 'unsaved'
+      ? 'configured'
+      : status
+  return (
+    <section id="central" className="central-destination">
+      <div className="eyebrow">CENTRALE BESTEMMING</div>
+      <h1>ONE.OS Central</h1>
+      <p>Configureer uitsluitend het vaste HTTPS-origin en de SHA-256-certificaatpin. Er worden nog geen inventarisgegevens gepubliceerd.</p>
+      <p className={`destination-status ${effectiveStatus}`} role="status">{labels[effectiveStatus]}</p>
+      <form
+        onSubmit={(event) => {
+          event.preventDefault()
+          onSave()
+        }}
+      >
+        <label>
+          Serveradres
+          <input
+            type="url"
+            required
+            disabled={busy}
+            value={origin}
+            onChange={(event) => onOriginChange(event.target.value)}
+            placeholder="https://central.example:8443"
+            autoComplete="off"
+          />
+        </label>
+        <label>
+          Certificaatfingerprint (SHA-256)
+          <input
+            required
+            disabled={busy}
+            value={fingerprint}
+            onChange={(event) => onFingerprintChange(event.target.value)}
+            placeholder="64 hextekens, eventueel met dubbele punten"
+            autoComplete="off"
+            spellCheck={false}
+          />
+        </label>
+        <div className="destination-actions">
+          <button type="submit" disabled={busy}>Bestemming opslaan</button>
+          <button type="button" onClick={onTest} disabled={busy || !draftIsPersisted}>
+            Verbinding testen
+          </button>
+        </div>
+      </form>
+      {destination?.configuredAt && <small>Laatst geconfigureerd: {destination.configuredAt}</small>}
+    </section>
+  )
+}
+
 
 function DiagnosticsPanel({diagnostics, audit}: {diagnostics: Diagnostics | null; audit: AuditEntry[]}) {
   return (

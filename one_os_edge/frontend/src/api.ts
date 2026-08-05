@@ -112,6 +112,24 @@ export type Diagnostics = {
   storage: {auditRecords: number; configurationBytes: number}
 }
 
+export type CentralDestination = {
+  configured: boolean
+  revision: number
+  origin: string | null
+  certificateFingerprint: string | null
+  configuredAt: string | null
+  status: 'not_configured' | 'configured'
+}
+
+export type CentralDiscoveryResult = {
+  status: 'reachable'
+  revision: number
+  service: string
+  schemaVersion: '1.0'
+  pairingSupported: false
+  phase: '2B.1-sandbox-foundation'
+}
+
 const base = (path: string) => `./api/v1${path}`
 
 export class ApiClient {
@@ -159,6 +177,10 @@ export class ApiClient {
 
   post<T>(path: string, body?: unknown): Promise<T> {
     return this.mutating<T>(path, 'POST', body)
+  }
+
+  put<T>(path: string, body?: unknown): Promise<T> {
+    return this.mutating<T>(path, 'PUT', body)
   }
 
   patch<T>(path: string, body?: unknown): Promise<T> {
@@ -264,6 +286,18 @@ export class ApiClient {
 
   diagnostics() {
     return this.get<Diagnostics>('/diagnostics/export')
+  }
+
+  centralDestination() {
+    return this.get<CentralDestination>('/central-destination')
+  }
+
+  saveCentralDestination(revision: number, origin: string, certificateFingerprint: string) {
+    return this.put<CentralDestination>('/central-destination', {revision, origin, certificateFingerprint})
+  }
+
+  testCentralDestination() {
+    return this.post<CentralDiscoveryResult>('/central-destination/test', {})
   }
 
   archivePreview(kind: string, id: string) {

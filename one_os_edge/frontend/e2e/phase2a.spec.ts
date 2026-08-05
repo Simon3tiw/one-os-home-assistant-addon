@@ -62,6 +62,23 @@ test('portrait inventory uses the full viewport without clipped horizontal conte
   expect(expandedPageWidth.scroll).toBeLessThanOrEqual(expandedPageWidth.client)
 })
 
+test('central destination persists and tests through the real backend process', async ({page}) => {
+  await page.goto('./')
+  await page.getByText('ONE.OS Central').click()
+  await expect(page.getByText('Niet geconfigureerd')).toBeVisible()
+  await page.getByLabel('Serveradres').fill('https://central.e2e.invalid:8443')
+  await page.getByLabel('Certificaatfingerprint (SHA-256)').fill('ab'.repeat(32))
+  await page.getByRole('button', {name: 'Bestemming opslaan'}).click()
+  await expect(page.getByText('Geconfigureerd', {exact: true})).toBeVisible()
+
+  await page.reload()
+  await page.getByText('ONE.OS Central').click()
+  await expect(page.getByLabel('Serveradres')).toHaveValue('https://central.e2e.invalid:8443')
+  await page.getByRole('button', {name: 'Verbinding testen'}).click()
+  await expect(page.getByText('Bereikbaar', {exact: true})).toBeVisible()
+})
+
+
 test('isolated non-root commissioning journey against a real backend process', async ({page}) => {
   await page.goto('./')
   await expect(page.getByRole('heading', {name: 'Home Assistant-inventaris'})).toBeVisible()
@@ -77,11 +94,11 @@ test('isolated non-root commissioning journey against a real backend process', a
   await expect(page.getByText('Temperatuursensor', {exact: true}).first()).toBeVisible()
   await expect(page.getByText('Automatisch afgeleid uit Home Assistant')).toBeVisible()
 
-  const nameField = page.getByLabel(/Pointnaam/)
+  const nameField = page.getByRole('textbox', {name: /Pointnaam/})
   await expect(nameField).toBeVisible()
   await nameField.fill('Persistent fixture')
   await page.getByRole('button', {name: 'Overrides opslaan'}).click()
-  await expect(page.getByLabel(/Pointnaam/)).toHaveValue('Persistent fixture', {timeout: 15000})
+  await expect(page.getByRole('textbox', {name: /Pointnaam/})).toHaveValue('Persistent fixture', {timeout: 15000})
 
   const pointCloudSelection = page.getByRole('checkbox', {name: /Includeer Persistent fixture in ONE.OS Cloud/})
   await pointCloudSelection.click()
