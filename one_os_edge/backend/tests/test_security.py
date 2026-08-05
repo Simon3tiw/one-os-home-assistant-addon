@@ -82,6 +82,49 @@ def test_mutation_origin_is_derived_from_home_assistant_config(tmp_path, fake_ha
     assert response.status_code == 200
 
 
+def test_same_origin_mutation_works_when_home_assistant_urls_are_unset(
+    tmp_path, fake_ha, monkeypatch
+):
+    """HA commonly leaves internal_url/external_url unset; ingress remains same-origin."""
+    from unittest.mock import AsyncMock
+
+    from fastapi.testclient import TestClient
+    from one_os_addon.app import create_app
+
+    monkeypatch.setattr(fake_ha, "trusted_origins", AsyncMock(return_value=set()))
+    app = create_app(
+        database_url=f"sqlite:///{tmp_path / 'empty-origins.db'}",
+        ha_client=fake_ha,
+        ingress_proxies={"testclient"},
+    )
+    headers = {"X-Remote-User-Id": "admin-1"}
+    with TestClient(app) as client:
+        token = client.get("/api/v1/session", headers=headers).json()["csrfToken"]
+        response = client.post(
+            "/api/v1/reconcile",
+            headers=headers
+            | {
+                "Origin": "http://testserver",
+                "Sec-Fetch-Site": "same-origin",
+                "Content-Type": "application/json",
+                "X-CSRF-Token": token,
+            },
+        )
+        cross_site = client.post(
+            "/api/v1/reconcile",
+            headers=headers
+            | {
+                "Origin": "https://evil.invalid",
+                "Sec-Fetch-Site": "cross-site",
+                "Content-Type": "application/json",
+                "X-CSRF-Token": token,
+            },
+        )
+    app.state.engine.dispose()
+    assert response.status_code == 200
+    assert cross_site.status_code == 403
+
+
 def test_expired_csrf_token_is_rejected(tmp_path, fake_ha):
     from fastapi.testclient import TestClient
     from one_os_addon.app import create_app

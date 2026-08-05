@@ -452,10 +452,16 @@ def create_app(
                 )
             except IncompatibleHomeAssistant:
                 return JSONResponse({"error": {"code": "origin_verification_unavailable"}}, 503)
-            if (
-                request.headers.get("origin", "").rstrip("/") not in trusted_origins
-                or request.headers.get("sec-fetch-site") != "same-origin"
-            ):
+            origin = request.headers.get("origin", "").rstrip("/")
+            parsed_origin = urlparse(origin)
+            valid_web_origin = (
+                parsed_origin.scheme in {"http", "https"}
+                and bool(parsed_origin.netloc)
+                and parsed_origin.username is None
+                and parsed_origin.password is None
+            )
+            origin_allowed = origin in trusted_origins if trusted_origins else valid_web_origin
+            if not origin_allowed or request.headers.get("sec-fetch-site") != "same-origin":
                 return JSONResponse({"error": {"code": "same_origin_required"}}, 403)
             token = request.headers.get("x-csrf-token")
             record = app.state.csrf.get(user)
@@ -1085,7 +1091,7 @@ def create_app(
             last = s.scalar(select(SyncRun).order_by(SyncRun.at.desc()))
             return {
                 "schemaVersion": "1.0",
-                "softwareVersion": "0.1.0",
+                "softwareVersion": "0.1.1",
                 "architecture": platform.machine(),
                 "installationHash": hashlib.sha256(
                     (site.installation_id if site else "uninitialized").encode()

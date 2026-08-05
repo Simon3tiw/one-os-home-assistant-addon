@@ -1,4 +1,5 @@
-from unittest.mock import AsyncMock, call
+import json
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 from one_os_addon.ha.client import HomeAssistantReadOnlyClient
@@ -35,3 +36,27 @@ async def test_trusted_origins_come_from_read_only_home_assistant_config():
         "https://building.example",
     }
     assert client._get.await_args == call("api/config")
+
+
+@pytest.mark.asyncio
+async def test_registry_websocket_allows_large_entity_registry(monkeypatch):
+    from one_os_addon.ha import client as client_module
+
+    ws = AsyncMock()
+    ws.recv.side_effect = [
+        json.dumps({"type": "auth_required"}),
+        json.dumps({"type": "auth_ok"}),
+        *[
+            json.dumps({"id": request_id, "type": "result", "success": True, "result": []})
+            for request_id in range(1, 5)
+        ],
+    ]
+    context = AsyncMock()
+    context.__aenter__.return_value = ws
+    connect = MagicMock(return_value=context)
+    monkeypatch.setattr(client_module.websockets, "connect", connect)
+
+    client = HomeAssistantReadOnlyClient("test-token")
+    await client._commands(["floors", "areas", "devices", "entities"])
+
+    assert connect.call_args.kwargs["max_size"] >= 16 * 1024 * 1024

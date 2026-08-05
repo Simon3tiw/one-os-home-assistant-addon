@@ -23,6 +23,7 @@ REGISTRY_EVENTS = {
     "entity_registry_updated",
 }
 BLOCKED_FRAGMENTS = ("call_service", "create", "update", "delete")
+MAX_WS_MESSAGE_SIZE = 16 * 1024 * 1024
 
 
 class HomeAssistantReadOnlyClient:
@@ -54,7 +55,11 @@ class HomeAssistantReadOnlyClient:
         result = {}
         request_id = 1
         try:
-            async with websockets.connect(self.ws_url, additional_headers=self._headers()) as ws:
+            async with websockets.connect(
+                self.ws_url,
+                additional_headers=self._headers(),
+                max_size=MAX_WS_MESSAGE_SIZE,
+            ) as ws:
                 hello = json.loads(await ws.recv())
                 if hello.get("type") == "auth_required":
                     await ws.send(json.dumps({"type": "auth", "access_token": self.__token}))
@@ -105,7 +110,11 @@ class HomeAssistantReadOnlyClient:
         allowed = {"state_changed", *REGISTRY_EVENTS}
         if not event_types or any(event_type not in allowed for event_type in event_types):
             raise IncompatibleHomeAssistant("event type outside read-only allowlist")
-        async with websockets.connect(self.ws_url, additional_headers=self._headers()) as ws:
+        async with websockets.connect(
+            self.ws_url,
+            additional_headers=self._headers(),
+            max_size=MAX_WS_MESSAGE_SIZE,
+        ) as ws:
             hello = json.loads(await ws.recv())
             if hello.get("type") != "auth_required":
                 raise IncompatibleHomeAssistant("websocket auth contract unavailable")
