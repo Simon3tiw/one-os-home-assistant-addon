@@ -114,11 +114,14 @@ test('isolated non-root commissioning journey against a real backend process', a
     false,
   )
   await page.getByRole('button', {name: /Persistent fixture/}).click()
-  await expect(page.getByLabel(/Pointnaam/)).toHaveValue('Persistent fixture')
+  await expect(page.getByRole('textbox', {name: /Pointnaam/})).toHaveValue('Persistent fixture')
   await expect(page.getByText('Automatisch afgeleid uit Home Assistant')).toBeVisible()
+  await page.getByRole('button', {name: 'Pointnaam terugzetten naar bron'}).click()
+  await expect(page.getByRole('textbox', {name: /Pointnaam/})).toHaveValue('Room temperature')
 
   await page.getByText('Diagnostiek').click()
   await expect(page.getByText('Systeemstatus & audit')).toBeVisible()
-  await expect(page.getByRole('cell', {name: 'point.override'})).toBeVisible()
+  await expect(page.getByRole('cell', {name: 'point.override', exact: true})).toBeVisible()
+  await expect(page.getByRole('cell', {name: 'point.override.reset', exact: true})).toBeVisible()
   await expect(page.getByRole('cell', {name: 'selection.bulk'})).toHaveCount(2)
 })

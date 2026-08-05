@@ -927,30 +927,53 @@ function Inspector({
       <form onSubmit={submit}>
         <label>
           Pointnaam
-          <input name="displayName" defaultValue={point.display.name.value} />
+          <input
+            key={`${point.id}:${point.revision}:displayName`}
+            name="displayName"
+            defaultValue={point.display.name.value}
+          />
           <small>{point.display.name.provenance}</small>
         </label>
         {point.display.name.provenance === 'one_os_override' && (
-          <button type="button" onClick={() => onReset('displayName')}>
+          <button
+            type="button"
+            aria-label="Pointnaam terugzetten naar bron"
+            onClick={() => onReset('displayName')}
+          >
             Terugzetten naar bron
           </button>
         )}
         <label>
           Weergave-eenheid
-          <input name="displayUnit" defaultValue={point.display.unit.value ?? ''} />
+          <input
+            key={`${point.id}:${point.revision}:displayUnit`}
+            name="displayUnit"
+            defaultValue={point.display.unit.value ?? ''}
+          />
           <small>{point.display.unit.provenance}</small>
         </label>
         {point.display.unit.provenance === 'one_os_override' && (
-          <button type="button" onClick={() => onReset('displayUnit')}>
+          <button
+            type="button"
+            aria-label="Weergave-eenheid terugzetten naar bron"
+            onClick={() => onReset('displayUnit')}
+          >
             Terugzetten naar bron
           </button>
         )}
         <label>
           Decimalen
-          <input name="decimals" type="number" min="0" max="6" defaultValue={point.display.decimals.value ?? 2} />
+          <input
+            key={`${point.id}:${point.revision}:decimals`}
+            name="decimals"
+            type="number"
+            min="0"
+            max="6"
+            defaultValue={point.display.decimals.value ?? 2}
+          />
         </label>
         {point.display.decimals.provenance === 'one_os_override' && (
-          <button type="button" onClick={() => onReset('decimals')}>
+          <button type="button" aria-label="Decimalen terugzetten naar bron" onClick={() => onReset('decimals')}>
             Terugzetten naar bron
           </button>
         )}

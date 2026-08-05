@@ -165,11 +165,8 @@ export class ApiClient {
     return this.mutating<T>(path, 'PATCH', body)
   }
 
-  async delete<T>(path: string): Promise<T> {
-    return this.request<T>(path, {
-      method: 'DELETE',
-      headers: {'X-CSRF-Token': this.csrfToken},
-    })
+  delete<T>(path: string): Promise<T> {
+    return this.mutating<T>(path, 'DELETE')
   }
 
   overview() {

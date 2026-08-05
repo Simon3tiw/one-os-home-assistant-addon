@@ -102,7 +102,7 @@ def test_diagnostics_is_allowlist_only_and_audit_is_safe(client, auth, fake_ha):
         "counts",
         "storage",
     }
-    assert diag.json()["softwareVersion"] == "0.1.5"
+    assert diag.json()["softwareVersion"] == "0.1.6"
     assert "CANARY" not in diag.text and "sensor.room_temperature" not in diag.text
     assert all(
         set(row) <= {"actorId", "at", "action", "objectId", "revision", "fields"}

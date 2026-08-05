@@ -2,6 +2,7 @@ import {afterEach, describe, expect, it, vi} from 'vitest'
 import {cleanup, render, screen, waitFor, within} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {App} from './App'
+import {ApiClient} from './api'
 
 afterEach(() => {
   cleanup()
@@ -148,7 +149,7 @@ function mockApi(point = makePoint(), inventory = makeInventory(point)) {
         return new Response(
           JSON.stringify({
             schemaVersion: '1.0',
-            softwareVersion: '0.1.5',
+            softwareVersion: '0.1.6',
             architecture: 'amd64',
             installationHash: 'hash',
             databaseRevision: '0003',
@@ -176,6 +177,26 @@ async function openDemoPoint(u: ReturnType<typeof userEvent.setup>) {
 }
 
 describe('commissioning UI', () => {
+  it('sends Point override resets as authenticated JSON mutations', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(new Response(JSON.stringify({csrfToken: 'csrf-reset'})))
+        .mockResolvedValueOnce(new Response(JSON.stringify(makePoint()))),
+    )
+    const client = new ApiClient()
+    await client.init()
+
+    await client.resetOverride('p1', 'displayName', 2)
+
+    const [, init] = vi.mocked(fetch).mock.calls[1]
+    const headers = new Headers(init?.headers)
+    expect(init?.method).toBe('DELETE')
+    expect(headers.get('Content-Type')).toBe('application/json')
+    expect(headers.get('X-CSRF-Token')).toBe('csrf-reset')
+  })
+
   it('renders overview and the searchable ontology tree', async () => {
     mockApi()
     render(<App />)
@@ -502,6 +523,6 @@ describe('commissioning UI', () => {
     render(<App />)
     await u.click(await screen.findByText('Diagnostiek'))
     expect(await screen.findByText('Systeemstatus & audit')).toBeInTheDocument()
-    expect(await screen.findByText('0.1.5')).toBeInTheDocument()
+    expect(await screen.findByText('0.1.6')).toBeInTheDocument()
   })
 })
