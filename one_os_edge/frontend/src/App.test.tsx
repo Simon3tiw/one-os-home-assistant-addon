@@ -121,7 +121,7 @@ function mockApi(point = makePoint()) {
         return new Response(
           JSON.stringify({
             schemaVersion: '1.0',
-            softwareVersion: '0.1.1',
+            softwareVersion: '0.1.2',
             architecture: 'amd64',
             installationHash: 'hash',
             databaseRevision: '0002',
@@ -277,6 +277,6 @@ describe('commissioning UI', () => {
     render(<App />)
     await u.click(await screen.findByText('Diagnostiek'))
     expect(await screen.findByText('Systeemstatus & audit')).toBeInTheDocument()
-    expect(await screen.findByText('0.1.1')).toBeInTheDocument()
+    expect(await screen.findByText('0.1.2')).toBeInTheDocument()
   })
 })

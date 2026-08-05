@@ -1,6 +1,6 @@
 [project]
 name = "one-os-ha-addon"
-version = "0.1.1"
+version = "0.1.2"
 requires-python = ">=3.13"
 dependencies = ["fastapi>=0.116.1", "uvicorn[standard]==0.35.0", "sqlalchemy==2.0.43", "alembic==1.16.5", "httpx==0.28.1", "websockets==15.0.1", "pydantic-settings==2.10.1"]
 [project.optional-dependencies]

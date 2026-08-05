@@ -1,5 +1,37 @@
 import {expect, test} from '@playwright/test'
 
+test('portrait inventory uses the full viewport without clipped horizontal content', async ({page}) => {
+  await page.setViewportSize({width: 390, height: 844})
+  await page.goto('./')
+  await page.getByText('Inventaris & ontologie').click()
+
+  const workspace = page.locator('#inventory')
+  await expect(workspace).toBeVisible()
+  const layout = await workspace.evaluate((element) => {
+    const rect = element.getBoundingClientRect()
+    return {
+      left: rect.left,
+      right: rect.right,
+      width: rect.width,
+      viewportWidth: document.documentElement.clientWidth,
+      pageWidth: document.documentElement.scrollWidth,
+    }
+  })
+
+  expect(layout.left).toBeGreaterThanOrEqual(0)
+  expect(layout.right).toBeLessThanOrEqual(layout.viewportWidth)
+  expect(layout.width).toBeGreaterThanOrEqual(layout.viewportWidth - 32)
+  expect(layout.pageWidth).toBeLessThanOrEqual(layout.viewportWidth)
+
+  const navigationFits = await page.locator('nav a').evaluateAll((links) =>
+    links.every((link) => {
+      const rect = link.getBoundingClientRect()
+      return rect.left >= 0 && rect.right <= document.documentElement.clientWidth
+    }),
+  )
+  expect(navigationFits).toBe(true)
+})
+
 test('isolated non-root commissioning journey against a real backend process', async ({page}) => {
   await page.goto('./')
   await expect(page.getByRole('heading', {name: 'Home Assistant-inventaris'})).toBeVisible()
