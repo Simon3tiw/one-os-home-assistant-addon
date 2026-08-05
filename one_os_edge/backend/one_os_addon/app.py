@@ -127,6 +127,28 @@ class ArchiveBody(BaseModel):
 MUTATING = {"POST", "PUT", "PATCH", "DELETE"}
 
 
+def is_valid_web_origin(value: str) -> bool:
+    try:
+        parsed = urlparse(value)
+        hostname = parsed.hostname
+        _port = parsed.port  # Materialize range and syntax validation.
+    except ValueError:
+        return False
+    return bool(
+        parsed.scheme in {"http", "https"}
+        and hostname
+        and not any(character.isspace() for character in parsed.netloc)
+        and "%" not in parsed.netloc
+        and parsed.username is None
+        and parsed.password is None
+        and not parsed.path
+        and not parsed.params
+        and not parsed.query
+        and not parsed.fragment
+        and value == f"{parsed.scheme}://{parsed.netloc}"
+    )
+
+
 def migrate_database(database_url: str) -> None:
     configured = os.getenv("ALEMBIC_CONFIG")
     candidates = [
@@ -475,20 +497,22 @@ def create_app(
                 )
             except IncompatibleHomeAssistant:
                 return JSONResponse({"error": {"code": "origin_verification_unavailable"}}, 503)
-            origin = request.headers.get("origin", "").rstrip("/")
-            parsed_origin = urlparse(origin)
-            valid_web_origin = (
-                parsed_origin.scheme in {"http", "https"}
-                and bool(parsed_origin.netloc)
-                and parsed_origin.username is None
-                and parsed_origin.password is None
-            )
+            origin = request.headers.get("origin", "")
+            valid_web_origin = is_valid_web_origin(origin)
             origin_allowed = origin in trusted_origins if trusted_origins else valid_web_origin
-            if not origin_allowed or request.headers.get("sec-fetch-site") != "same-origin":
-                return JSONResponse({"error": {"code": "same_origin_required"}}, 403)
+            fetch_site = request.headers.get("sec-fetch-site")
             token = request.headers.get("x-csrf-token")
             record = app.state.csrf.get(user)
-            if not token or not record or record[0] != token or record[1] < time.monotonic():
+            token_valid = bool(
+                token and record and record[0] == token and record[1] >= time.monotonic()
+            )
+            bound_origin = record[2] if record and len(record) > 2 else None
+            same_origin_evidence = fetch_site == "same-origin" or (
+                fetch_site in {None, "same-site"} and valid_web_origin and bound_origin == origin
+            )
+            if not origin_allowed or not same_origin_evidence:
+                return JSONResponse({"error": {"code": "same_origin_required"}}, 403)
+            if not token_valid:
                 app.state.csrf.pop(user, None)
                 return JSONResponse({"error": {"code": "csrf_invalid"}}, 403)
             if request.headers.get("content-type", "").split(";", 1)[0] != "application/json":
@@ -504,10 +528,14 @@ def create_app(
 
     @app.get("/api/v1/session")
     def session(request: Request):
+        browser_origin = request.query_params.get("browserOrigin", "")
+        if browser_origin and not is_valid_web_origin(browser_origin):
+            raise HTTPException(400, detail={"code": "invalid_browser_origin"})
         token = secrets.token_urlsafe(32)
         app.state.csrf[request.state.user_id] = (
             token,
             time.monotonic() + app.state.csrf_ttl_seconds,
+            browser_origin or None,
         )
         return {"csrfToken": token, "expiresIn": app.state.csrf_ttl_seconds}
 
@@ -1125,7 +1153,7 @@ def create_app(
             last = s.scalar(select(SyncRun).order_by(SyncRun.at.desc()))
             return {
                 "schemaVersion": "1.0",
-                "softwareVersion": "0.1.4",
+                "softwareVersion": "0.1.5",
                 "architecture": platform.machine(),
                 "installationHash": hashlib.sha256(
                     (site.installation_id if site else "uninitialized").encode()

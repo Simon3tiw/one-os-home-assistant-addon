@@ -148,7 +148,7 @@ function mockApi(point = makePoint(), inventory = makeInventory(point)) {
         return new Response(
           JSON.stringify({
             schemaVersion: '1.0',
-            softwareVersion: '0.1.4',
+            softwareVersion: '0.1.5',
             architecture: 'amd64',
             installationHash: 'hash',
             databaseRevision: '0003',
@@ -288,6 +288,26 @@ describe('commissioning UI', () => {
     })
   })
 
+  it('keeps the loaded inventory visible when a placement mutation fails', async () => {
+    mockApi()
+    const regularFetch = vi.mocked(fetch).getMockImplementation()!
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes('/assets/a1')) {
+        return new Response(JSON.stringify({error: {code: 'same_origin_required'}}), {status: 403})
+      }
+      return regularFetch(input, init)
+    })
+    const u = userEvent.setup()
+    render(<App />)
+    await openOfficeRoom(u)
+    await u.click(screen.getByRole('button', {name: 'Uitklappen Office multisensor'}))
+    await u.selectOptions(screen.getByLabelText('Ruimte voor device Office multisensor'), 'sp2')
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('same_origin_required')
+    expect(screen.getByRole('heading', {name: 'Inventaris'})).toBeInTheDocument()
+    expect(screen.queryByRole('heading', {name: 'Kan commissioning-gegevens niet laden'})).not.toBeInTheDocument()
+  })
+
   it('moves a Point to an existing device while showing its location path', async () => {
     mockApi()
     const u = userEvent.setup()
@@ -378,6 +398,26 @@ describe('commissioning UI', () => {
     )
   })
 
+  it('includes an individual Point in ONE.OS Cloud through its own checkbox', async () => {
+    mockApi()
+    const u = userEvent.setup()
+    render(<App />)
+    await openDemoPoint(u)
+
+    await u.click(screen.getByRole('checkbox', {name: 'Includeer Demo temperature in ONE.OS Cloud'}))
+    expect(screen.getByRole('dialog', {name: 'Beoordelen en selecteren'})).toBeInTheDocument()
+    await u.click(screen.getByRole('button', {name: 'Beoordelen en selecteren'}))
+
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        expect.stringContaining('/selection/point/p1'),
+        expect.objectContaining({method: 'POST'}),
+      ),
+    )
+    const call = vi.mocked(fetch).mock.calls.find(([url]) => String(url).includes('/selection/point/p1'))
+    expect(JSON.parse(String(call?.[1]?.body))).toEqual({intent: 'include', review: true})
+  })
+
   it('traps focus in the selection dialog and restores focus on Escape', async () => {
     mockApi()
     const u = userEvent.setup()
@@ -462,6 +502,6 @@ describe('commissioning UI', () => {
     render(<App />)
     await u.click(await screen.findByText('Diagnostiek'))
     expect(await screen.findByText('Systeemstatus & audit')).toBeInTheDocument()
-    expect(await screen.findByText('0.1.4')).toBeInTheDocument()
+    expect(await screen.findByText('0.1.5')).toBeInTheDocument()
   })
 })

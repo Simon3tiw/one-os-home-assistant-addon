@@ -198,6 +198,63 @@ def test_selection_requires_review_and_control_remains_separate(client, auth):
     )
 
 
+def test_new_point_does_not_inherit_prior_device_cloud_selection(client, auth, fake_ha):
+    data = imported(client, auth)
+    asset = next(
+        asset
+        for structure in data["structures"]
+        for space in structure["spaces"]
+        for asset in space["assets"]
+        if any(
+            point["source"]["registryId"] == "sensor.room_temperature" for point in asset["points"]
+        )
+    )
+    selected = client.post(
+        f"/api/v1/selection/asset/{asset['id']}",
+        headers=auth,
+        json={"intent": "include", "review": True},
+    )
+    assert selected.json()["state"] == "selected"
+
+    fake_ha.entities.append(
+        {
+            "entity_id": "sensor.later_discovered",
+            "unique_id": "later-001",
+            "platform": "demo",
+            "config_entry_id": "entry-1",
+            "device_id": "device-1",
+            "area_id": None,
+            "name": "Later discovered",
+            "disabled_by": None,
+            "hidden_by": None,
+            "entity_category": None,
+        }
+    )
+    fake_ha.states["sensor.later_discovered"] = {
+        "state": "42",
+        "last_updated": "2026-08-05T08:00:00Z",
+        "attributes": {"friendly_name": "Later discovered"},
+    }
+    assert client.post("/api/v1/reconcile", headers=auth).status_code == 200
+
+    refreshed = client.get("/api/v1/inventory", headers=auth).json()
+    refreshed_asset = next(
+        candidate
+        for structure in refreshed["structures"]
+        for space in structure["spaces"]
+        for candidate in space["assets"]
+        if candidate["id"] == asset["id"]
+    )
+    new_point = next(
+        point
+        for point in refreshed_asset["points"]
+        if point["source"]["registryId"] == "sensor.later_discovered"
+    )
+    assert new_point["selectionIntent"] == "unset"
+    assert new_point["effectiveSelected"] is False
+    assert refreshed_asset["selectionState"] == "partial"
+
+
 def test_capability_is_evidence_bounded_and_drift_disables_control(client, auth, fake_ha):
     p = next(
         x

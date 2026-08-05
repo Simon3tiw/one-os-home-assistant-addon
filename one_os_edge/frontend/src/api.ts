@@ -120,7 +120,11 @@ export class ApiClient {
   constructor(private onUnauthorized?: () => void) {}
 
   async init(): Promise<void> {
-    const session = await this.get<{csrfToken: string}>('/session')
+    const browserOrigin = window.location.origin
+    const originQuery = /^https?:\/\//.test(browserOrigin)
+      ? `?browserOrigin=${encodeURIComponent(browserOrigin)}`
+      : ''
+    const session = await this.get<{csrfToken: string}>(`/session${originQuery}`)
     this.csrfToken = session.csrfToken
   }
 
@@ -148,7 +152,6 @@ export class ApiClient {
       headers: {
         'Content-Type': 'application/json',
         'X-CSRF-Token': this.csrfToken,
-        'Sec-Fetch-Site': 'same-origin',
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     })
@@ -165,7 +168,7 @@ export class ApiClient {
   async delete<T>(path: string): Promise<T> {
     return this.request<T>(path, {
       method: 'DELETE',
-      headers: {'X-CSRF-Token': this.csrfToken, 'Sec-Fetch-Site': 'same-origin'},
+      headers: {'X-CSRF-Token': this.csrfToken},
     })
   }
 

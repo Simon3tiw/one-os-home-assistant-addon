@@ -4,7 +4,7 @@ import type {Asset, AuditEntry, Diagnostics, Inventory, Overview, Point, Propert
 import {Modal} from './Modal'
 
 type Section = 'overview' | 'inventory' | 'diagnostics'
-type SelectionDialog = {kind: 'asset' | 'space' | 'structure'; id: string; name: string}
+type SelectionDialog = {kind: 'point' | 'asset' | 'space' | 'structure'; id: string; name: string}
 type ArchiveDialog = {kind: 'assets' | 'spaces' | 'structures'; id: string; name: string; revision: number}
 type SplitDialog = {asset: Asset}
 type MergeDialog = {asset: Asset; targets: Asset[]}
@@ -133,7 +133,8 @@ export function App() {
 
   const [overview, setOverview] = useState<Overview | null>(null)
   const [inventory, setInventory] = useState<Inventory | null>(null)
-  const [error, setError] = useState('')
+  const [loadError, setLoadError] = useState('')
+  const [actionError, setActionError] = useState('')
   const [section, setSection] = useState<Section>('overview')
   const [query, setQuery] = useState('')
   const [onlyUnreviewed, setOnlyUnreviewed] = useState(false)
@@ -159,7 +160,7 @@ export function App() {
         setOverview(o)
         setInventory(i)
       } catch (e) {
-        if (!cancelled) setError(String(e))
+        if (!cancelled) setLoadError(String(e))
       }
     }
     load()
@@ -213,7 +214,7 @@ export function App() {
       await client.moveAsset(asset.id, asset.revision, spaceId)
       await refreshInventory()
     } catch (e) {
-      setError(String(e))
+      setActionError(String(e))
     } finally {
       setBusy(false)
     }
@@ -226,7 +227,7 @@ export function App() {
       const updated = await client.movePoint(selected.id, selected.revision, assetId)
       await refreshInventory(updated)
     } catch (e) {
-      setError(String(e))
+      setActionError(String(e))
     } finally {
       setBusy(false)
     }
@@ -238,7 +239,7 @@ export function App() {
       await client.reconcile()
       await refreshInventory()
     } catch (e) {
-      setError(String(e))
+      setActionError(String(e))
     } finally {
       setBusy(false)
     }
@@ -263,7 +264,7 @@ export function App() {
       setSelectionDialog(null)
       await refreshInventory()
     } catch (e) {
-      setError(String(e))
+      setActionError(String(e))
     } finally {
       setBusy(false)
     }
@@ -275,7 +276,7 @@ export function App() {
       await client.select(kind, id, 'exclude', false)
       await refreshInventory()
     } catch (e) {
-      setError(String(e))
+      setActionError(String(e))
     } finally {
       setBusy(false)
     }
@@ -293,7 +294,7 @@ export function App() {
       const updated = await client.overrides(selected.id, selected.revision, form)
       await refreshInventory(updated)
     } catch (e) {
-      setError(String(e))
+      setActionError(String(e))
     } finally {
       setBusy(false)
     }
@@ -306,7 +307,7 @@ export function App() {
       const updated = await client.resetOverride(selected.id, field, selected.revision)
       await refreshInventory(updated)
     } catch (e) {
-      setError(String(e))
+      setActionError(String(e))
     } finally {
       setBusy(false)
     }
@@ -319,7 +320,7 @@ export function App() {
       const updated = await client.control(selected.id, selected.revision, enabled)
       await refreshInventory(updated)
     } catch (e) {
-      setError(String(e))
+      setActionError(String(e))
     } finally {
       setBusy(false)
     }
@@ -332,7 +333,7 @@ export function App() {
       const updated = await client.acceptTemporaryBinding(selected.id, selected.revision)
       await refreshInventory(updated)
     } catch (e) {
-      setError(String(e))
+      setActionError(String(e))
     } finally {
       setBusy(false)
     }
@@ -345,7 +346,7 @@ export function App() {
       const created = await client.createProperty('point', selected.id, key, valueType, value)
       setProperties((prev) => [...prev, created])
     } catch (e) {
-      setError(String(e))
+      setActionError(String(e))
     } finally {
       setBusy(false)
     }
@@ -357,7 +358,7 @@ export function App() {
       await client.deleteProperty(propertyId, revision)
       setProperties((prev) => prev.filter((p) => p.id !== propertyId))
     } catch (e) {
-      setError(String(e))
+      setActionError(String(e))
     } finally {
       setBusy(false)
     }
@@ -371,7 +372,7 @@ export function App() {
       setSplitDialog(null)
       await refreshInventory()
     } catch (e) {
-      setError(String(e))
+      setActionError(String(e))
     } finally {
       setBusy(false)
     }
@@ -385,7 +386,7 @@ export function App() {
       setMergeDialog(null)
       await refreshInventory()
     } catch (e) {
-      setError(String(e))
+      setActionError(String(e))
     } finally {
       setBusy(false)
     }
@@ -399,17 +400,17 @@ export function App() {
       setArchiveDialog(null)
       await refreshInventory()
     } catch (e) {
-      setError(String(e))
+      setActionError(String(e))
     } finally {
       setBusy(false)
     }
   }
 
-  if (error) {
+  if (loadError) {
     return (
       <main className="state">
         <h1>Kan commissioning-gegevens niet laden</h1>
-        <p role="alert">{error}</p>
+        <p role="alert">{loadError}</p>
         <button onClick={() => location.reload()}>Opnieuw proberen</button>
       </main>
     )
@@ -469,6 +470,14 @@ export function App() {
         </div>
       </aside>
       <main>
+        {actionError && (
+          <div className="notice" role="alert">
+            Actie niet uitgevoerd: {actionError}
+            <button type="button" onClick={() => setActionError('')}>
+              Sluiten
+            </button>
+          </div>
+        )}
         {section === 'overview' && (
           <section id="overview">
             <div className="eyebrow">SYSTEEMOVERZICHT</div>
@@ -537,6 +546,10 @@ export function App() {
                     expandMatches={Boolean(query || onlyUnreviewed || onlySelected)}
                     selectedPointId={selected?.id ?? null}
                     onSelectPoint={setSelected}
+                    onIncludePoint={(point) =>
+                      setSelectionDialog({kind: 'point', id: point.id, name: point.display.name.value})
+                    }
+                    onExcludePoint={(point) => excludeSelection('point', point.id)}
                     spaceOptions={spaceOptions(inventory)}
                     onMoveAsset={moveAsset}
                     onSelectAsset={(asset) =>
@@ -617,6 +630,8 @@ function StructureNode({
   expandMatches,
   selectedPointId,
   onSelectPoint,
+  onIncludePoint,
+  onExcludePoint,
   spaceOptions,
   onMoveAsset,
   onSelectAsset,
@@ -631,6 +646,8 @@ function StructureNode({
   expandMatches: boolean
   selectedPointId: string | null
   onSelectPoint: (p: Point) => void
+  onIncludePoint: (p: Point) => void
+  onExcludePoint: (p: Point) => void
   spaceOptions: {id: string; label: string}[]
   onMoveAsset: (asset: Asset, spaceId: string) => void
   onSelectAsset: (a: Asset) => void
@@ -771,22 +788,33 @@ function StructureNode({
               {(expandMatches || expandedAssets.has(a.id)) && (
                 <div className="asset-points" id={`asset-points-${a.id}`}>
                   {a.points.map((p) => (
-                    <button
-                      className={`point ${selectedPointId === p.id ? 'selected' : ''}`}
-                      key={p.id}
-                      onClick={() => onSelectPoint(p)}
-                    >
-                      <span className={`dot ${p.valueQuality}`} />
-                      <span>
-                        {p.display.name.value}
-                        <small>{p.source.registryId}</small>
-                        <span className="ontology-name">{ontologyLabel(p.ontologyClass)}</span>
-                      </span>
-                      <em>{p.value.formatted}</em>
-                      {p.sourceLifecycle !== 'active' && <mark>{p.sourceLifecycle}</mark>}
-                      {p.capability.highRisk && <mark>hoog risico</mark>}
-                      {p.bindingStability === 'temporary' && <mark>tijdelijk</mark>}
-                    </button>
+                    <div className="point-row" key={p.id}>
+                      <label className="point-cloud-toggle">
+                        <input
+                          type="checkbox"
+                          className="point-cloud-selection"
+                          aria-label={`Includeer ${p.display.name.value} in ONE.OS Cloud`}
+                          checked={p.effectiveSelected}
+                          onChange={() => (p.effectiveSelected ? onExcludePoint(p) : onIncludePoint(p))}
+                        />
+                        <span aria-hidden="true">Cloud</span>
+                      </label>
+                      <button
+                        className={`point ${selectedPointId === p.id ? 'selected' : ''}`}
+                        onClick={() => onSelectPoint(p)}
+                      >
+                        <span className={`dot ${p.valueQuality}`} />
+                        <span>
+                          {p.display.name.value}
+                          <small>{p.source.registryId}</small>
+                          <span className="ontology-name">{ontologyLabel(p.ontologyClass)}</span>
+                        </span>
+                        <em>{p.value.formatted}</em>
+                        {p.sourceLifecycle !== 'active' && <mark>{p.sourceLifecycle}</mark>}
+                        {p.capability.highRisk && <mark>hoog risico</mark>}
+                        {p.bindingStability === 'temporary' && <mark>tijdelijk</mark>}
+                      </button>
+                    </div>
                   ))}
                 </div>
               )}
