@@ -121,7 +121,7 @@ function mockApi(point = makePoint()) {
         return new Response(
           JSON.stringify({
             schemaVersion: '1.0',
-            softwareVersion: '0.1.2',
+            softwareVersion: '0.1.3',
             architecture: 'amd64',
             installationHash: 'hash',
             databaseRevision: '0002',
@@ -137,6 +137,12 @@ function mockApi(point = makePoint()) {
   )
 }
 
+async function openDemoPoint(u: ReturnType<typeof userEvent.setup>) {
+  await u.click(await screen.findByText('Inventaris & ontologie'))
+  await u.click(await screen.findByRole('button', {name: 'Uitklappen Office multisensor'}))
+  await u.click(await screen.findByRole('button', {name: /Demo temperature/}))
+}
+
 describe('commissioning UI', () => {
   it('renders overview and the searchable ontology tree', async () => {
     mockApi()
@@ -145,6 +151,24 @@ describe('commissioning UI', () => {
     await userEvent.click(screen.getByText('Inventaris & ontologie'))
     expect(await screen.findByText('Ground floor')).toBeInTheDocument()
     expect(screen.getByText('Office multisensor')).toBeInTheDocument()
+  })
+
+  it('collapses device points by default and toggles them with an accessible disclosure', async () => {
+    mockApi()
+    const u = userEvent.setup()
+    render(<App />)
+    await u.click(await screen.findByText('Inventaris & ontologie'))
+
+    const expand = await screen.findByRole('button', {name: 'Uitklappen Office multisensor'})
+    expect(expand).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByRole('button', {name: /Demo temperature/})).not.toBeInTheDocument()
+
+    await u.click(expand)
+    expect(screen.getByRole('button', {name: 'Inklappen Office multisensor'})).toHaveAttribute('aria-expanded', 'true')
+    expect(await screen.findByRole('button', {name: /Demo temperature/})).toBeInTheDocument()
+
+    await u.click(screen.getByRole('button', {name: 'Inklappen Office multisensor'}))
+    expect(screen.queryByRole('button', {name: /Demo temperature/})).not.toBeInTheDocument()
   })
 
   it('filters the tree by search query', async () => {
@@ -162,8 +186,7 @@ describe('commissioning UI', () => {
     mockApi()
     const u = userEvent.setup()
     render(<App />)
-    await u.click(await screen.findByText('Inventaris & ontologie'))
-    await u.click(await screen.findByRole('button', {name: /Demo temperature/}))
+    await openDemoPoint(u)
     expect((await screen.findAllByText('20,42 °C')).length).toBeGreaterThan(0)
     const name = screen.getByLabelText(/Weergavenaam/)
     await u.clear(name)
@@ -234,8 +257,7 @@ describe('commissioning UI', () => {
     mockApi(controllablePoint)
     const u = userEvent.setup()
     render(<App />)
-    await u.click(await screen.findByText('Inventaris & ontologie'))
-    await u.click(await screen.findByRole('button', {name: /Demo temperature/}))
+    await openDemoPoint(u)
     const toggle = screen.getByRole('button', {name: 'Inschakelen'})
     expect(toggle).not.toBeDisabled()
     await u.click(toggle)
@@ -247,8 +269,7 @@ describe('commissioning UI', () => {
     mockApi(temporaryPoint)
     const u = userEvent.setup()
     render(<App />)
-    await u.click(await screen.findByText('Inventaris & ontologie'))
-    await u.click(await screen.findByRole('button', {name: /Demo temperature/}))
+    await openDemoPoint(u)
     expect(screen.getByText(/tijdelijk en moet expliciet worden geaccepteerd/)).toBeInTheDocument()
     await u.click(screen.getByRole('button', {name: 'Tijdelijke binding accepteren'}))
     await waitFor(() =>
@@ -263,8 +284,7 @@ describe('commissioning UI', () => {
     mockApi()
     const u = userEvent.setup()
     render(<App />)
-    await u.click(await screen.findByText('Inventaris & ontologie'))
-    await u.click(await screen.findByRole('button', {name: /Demo temperature/}))
+    await openDemoPoint(u)
     await u.type(screen.getByLabelText('Sleutel'), 'note')
     await u.type(screen.getByLabelText('Waarde'), 'hello')
     await u.click(screen.getByRole('button', {name: 'Eigenschap toevoegen'}))
@@ -277,6 +297,6 @@ describe('commissioning UI', () => {
     render(<App />)
     await u.click(await screen.findByText('Diagnostiek'))
     expect(await screen.findByText('Systeemstatus & audit')).toBeInTheDocument()
-    expect(await screen.findByText('0.1.2')).toBeInTheDocument()
+    expect(await screen.findByText('0.1.3')).toBeInTheDocument()
   })
 })

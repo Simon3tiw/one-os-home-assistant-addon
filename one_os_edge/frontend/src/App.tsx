@@ -423,6 +423,7 @@ export function App() {
                   <StructureNode
                     key={s.id}
                     structure={s}
+                    expandMatches={Boolean(query || onlyUnreviewed || onlySelected)}
                     selectedPointId={selected?.id ?? null}
                     onSelectPoint={setSelected}
                     onSelectAsset={(asset) =>
@@ -496,6 +497,7 @@ export function App() {
 
 function StructureNode({
   structure,
+  expandMatches,
   selectedPointId,
   onSelectPoint,
   onSelectAsset,
@@ -507,6 +509,7 @@ function StructureNode({
   onArchiveAsset,
 }: {
   structure: Structure
+  expandMatches: boolean
   selectedPointId: string | null
   onSelectPoint: (p: Point) => void
   onSelectAsset: (a: Asset) => void
@@ -517,6 +520,17 @@ function StructureNode({
   onMerge: (a: Asset) => void
   onArchiveAsset: (a: Asset) => void
 }) {
+  const [expandedAssets, setExpandedAssets] = useState<Set<string>>(() => new Set())
+
+  function toggleAsset(assetId: string) {
+    setExpandedAssets((current) => {
+      const next = new Set(current)
+      if (next.has(assetId)) next.delete(assetId)
+      else next.add(assetId)
+      return next
+    })
+  }
+
   return (
     <div className="node structure">
       <h3>
@@ -552,6 +566,19 @@ function StructureNode({
           {sp.assets.map((a) => (
             <div key={a.id} className="node asset">
               <div className="asset-row">
+                <button
+                  type="button"
+                  className="asset-disclosure"
+                  aria-expanded={expandMatches || expandedAssets.has(a.id)}
+                  aria-controls={`asset-points-${a.id}`}
+                  aria-label={`${expandMatches || expandedAssets.has(a.id) ? 'Inklappen' : 'Uitklappen'} ${a.name}`}
+                  disabled={expandMatches}
+                  onClick={() => toggleAsset(a.id)}
+                >
+                  <svg aria-hidden="true" viewBox="0 0 16 16">
+                    <path d="m5 3 5 5-5 5" />
+                  </svg>
+                </button>
                 <input
                   type="checkbox"
                   aria-label={`Selecteer ${a.name}`}
@@ -562,36 +589,45 @@ function StructureNode({
                   onChange={() => (a.selectionState === 'selected' ? onExcludeAsset(a) : onSelectAsset(a))}
                 />
                 <b>{a.name}</b>
-                <small>{a.type} · {a.physicalDeviceId ? 'Fysiek apparaat gekoppeld' : 'Standalone'}</small>
-                <div className="asset-actions">
-                  <button type="button" onClick={() => onSplit(a)} disabled={a.points.length < 2}>
-                    Splitsen
-                  </button>
-                  <button type="button" onClick={() => onMerge(a)}>
-                    Samenvoegen
-                  </button>
-                  <button type="button" onClick={() => onArchiveAsset(a)}>
-                    Archiveren
-                  </button>
-                </div>
+                <small>
+                  {a.type} · {a.physicalDeviceId ? 'Fysiek apparaat gekoppeld' : 'Standalone'} · {a.points.length}{' '}
+                  {a.points.length === 1 ? 'point' : 'points'}
+                </small>
+                {(expandMatches || expandedAssets.has(a.id)) && (
+                  <div className="asset-actions">
+                    <button type="button" onClick={() => onSplit(a)} disabled={a.points.length < 2}>
+                      Splitsen
+                    </button>
+                    <button type="button" onClick={() => onMerge(a)}>
+                      Samenvoegen
+                    </button>
+                    <button type="button" onClick={() => onArchiveAsset(a)}>
+                      Archiveren
+                    </button>
+                  </div>
+                )}
               </div>
-              {a.points.map((p) => (
-                <button
-                  className={`point ${selectedPointId === p.id ? 'selected' : ''}`}
-                  key={p.id}
-                  onClick={() => onSelectPoint(p)}
-                >
-                  <span className={`dot ${p.valueQuality}`} />
-                  <span>
-                    {p.display.name.value}
-                    <small>{p.source.registryId}</small>
-                  </span>
-                  <em>{p.value.formatted}</em>
-                  {p.sourceLifecycle !== 'active' && <mark>{p.sourceLifecycle}</mark>}
-                  {p.capability.highRisk && <mark>hoog risico</mark>}
-                  {p.bindingStability === 'temporary' && <mark>tijdelijk</mark>}
-                </button>
-              ))}
+              {(expandMatches || expandedAssets.has(a.id)) && (
+                <div className="asset-points" id={`asset-points-${a.id}`}>
+                  {a.points.map((p) => (
+                    <button
+                      className={`point ${selectedPointId === p.id ? 'selected' : ''}`}
+                      key={p.id}
+                      onClick={() => onSelectPoint(p)}
+                    >
+                      <span className={`dot ${p.valueQuality}`} />
+                      <span>
+                        {p.display.name.value}
+                        <small>{p.source.registryId}</small>
+                      </span>
+                      <em>{p.value.formatted}</em>
+                      {p.sourceLifecycle !== 'active' && <mark>{p.sourceLifecycle}</mark>}
+                      {p.capability.highRisk && <mark>hoog risico</mark>}
+                      {p.bindingStability === 'temporary' && <mark>tijdelijk</mark>}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           ))}
         </div>

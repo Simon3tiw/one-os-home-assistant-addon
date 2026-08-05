@@ -5,6 +5,11 @@ test('portrait inventory uses the full viewport without clipped horizontal conte
   await page.goto('./')
   await page.getByText('Inventaris & ontologie').click()
 
+  const disclosure = page.getByRole('button', {name: /Uitklappen Office multisensor/})
+  await expect(disclosure).toBeVisible()
+  await expect(disclosure).toHaveAttribute('aria-expanded', 'false')
+  await expect(page.locator('.asset-points')).toHaveCount(0)
+
   const workspace = page.locator('#inventory')
   await expect(workspace).toBeVisible()
   const layout = await workspace.evaluate((element) => {
@@ -40,6 +45,7 @@ test('isolated non-root commissioning journey against a real backend process', a
   await page.getByRole('button', {name: 'Nu ontdekken'}).click()
   await expect(page.getByText('Ground floor')).toBeVisible()
 
+  await page.getByRole('button', {name: /Uitklappen Office multisensor/}).click()
   await page.getByRole('button', {name: /Room temperature/}).click()
   await expect(page.getByText(/21,24 °C|21,2 °C/).last()).toBeVisible()
 
@@ -59,6 +65,7 @@ test('isolated non-root commissioning journey against a real backend process', a
   // browser reload driven entirely by server state (no client cache).
   await page.reload()
   await page.getByText('Inventaris & ontologie').click()
+  await page.getByRole('button', {name: /Uitklappen Office multisensor/}).click()
   await expect(page.getByText('Persistent fixture')).toBeVisible()
   await page.getByRole('button', {name: /Persistent fixture/}).click()
   await expect(page.getByLabel(/Weergavenaam/)).toHaveValue('Persistent fixture')
