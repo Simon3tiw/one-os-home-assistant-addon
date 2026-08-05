@@ -16,6 +16,8 @@ export type Point = {
   temporaryAccepted: boolean
   placementOverride: boolean
   placementConflict: boolean
+  ontologyClass: string | null
+  ontologyClassProvenance: 'home_assistant_inferred' | 'one_os_override' | 'unset'
   display: {
     name: {value: string; provenance: string}
     unit: Provenance
@@ -32,6 +34,7 @@ export type Point = {
 
 export type Asset = {
   id: string
+  spaceId: string
   name: string
   type: string
   revision: number
@@ -64,6 +67,7 @@ export type Structure = {
 }
 
 export type Inventory = {
+  site: {id: string; name: string} | null
   structures: Structure[]
   flatPoints: Point[]
   counts: Record<string, number>
@@ -209,6 +213,13 @@ export class ApiClient {
 
   movePoint(pointId: string, revision: number, assetId: string) {
     return this.patch<Point>(`/points/${pointId}/placement`, {revision, assetId})
+  }
+
+  moveAsset(assetId: string, revision: number, spaceId: string) {
+    return this.patch<{id: string; revision: number; spaceId: string}>(`/assets/${assetId}`, {
+      revision,
+      spaceId,
+    })
   }
 
   acceptTemporaryBinding(pointId: string, revision: number) {

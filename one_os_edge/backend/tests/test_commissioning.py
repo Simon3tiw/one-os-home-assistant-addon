@@ -1,3 +1,6 @@
+from one_os_addon.models import Asset, Point, Space
+
+
 def imported(client, auth):
     client.post("/api/v1/reconcile", headers=auth)
     return client.get("/api/v1/inventory", headers=auth).json()
@@ -41,6 +44,125 @@ def test_override_validation_reset_and_optimistic_concurrency(client, auth):
         f"/api/v1/points/{p['id']}/overrides/displayName?revision={rev}", headers=auth
     )
     assert reset.json()["display"]["name"]["provenance"] == "home_assistant"
+
+
+def test_inventory_exposes_site_and_placement_ids(client, auth):
+    data = imported(client, auth)
+    assert data["site"]["id"]
+    assert data["site"]["name"]
+    asset = data["structures"][0]["spaces"][0]["assets"][0]
+    assert asset["spaceId"]
+    assert asset["points"][0]["assetId"] == asset["id"]
+
+
+def test_placement_requires_active_source_and_target(client, auth):
+    data = imported(client, auth)
+    assets = [
+        asset
+        for structure in data["structures"]
+        for space in structure["spaces"]
+        for asset in space["assets"]
+    ]
+    source = next(asset for asset in assets if asset["points"])
+    target = next(asset for asset in assets if asset["id"] != source["id"])
+    point = source["points"][0]
+    target_space = next(
+        space
+        for structure in data["structures"]
+        for space in structure["spaces"]
+        if space["id"] != source["spaceId"]
+    )
+
+    with client.app.state.session() as session:
+        session.get(Asset, target["id"]).lifecycle = "missing"
+        session.commit()
+    assert (
+        client.patch(
+            f"/api/v1/points/{point['id']}/placement",
+            headers=auth,
+            json={"revision": point["revision"], "assetId": target["id"]},
+        ).status_code
+        == 422
+    )
+
+    with client.app.state.session() as session:
+        session.get(Asset, target["id"]).lifecycle = "active"
+        session.get(Point, point["id"]).lifecycle = "missing"
+        session.commit()
+    assert (
+        client.patch(
+            f"/api/v1/points/{point['id']}/placement",
+            headers=auth,
+            json={"revision": point["revision"], "assetId": target["id"]},
+        ).status_code
+        == 422
+    )
+
+    with client.app.state.session() as session:
+        session.get(Point, point["id"]).lifecycle = "active"
+        session.get(Space, target_space["id"]).lifecycle = "missing"
+        session.commit()
+    assert (
+        client.patch(
+            f"/api/v1/assets/{source['id']}",
+            headers=auth,
+            json={"revision": source["revision"], "spaceId": target_space["id"]},
+        ).status_code
+        == 422
+    )
+
+    with client.app.state.session() as session:
+        session.get(Space, target_space["id"]).lifecycle = "active"
+        session.get(Asset, source["id"]).lifecycle = "missing"
+        session.commit()
+    assert (
+        client.patch(
+            f"/api/v1/assets/{source['id']}",
+            headers=auth,
+            json={"revision": source["revision"], "spaceId": target_space["id"]},
+        ).status_code
+        == 422
+    )
+
+
+def test_ontology_override_requires_uri_and_persists(client, auth):
+    p = next(
+        x
+        for x in imported(client, auth)["flatPoints"]
+        if x["source"]["registryId"] == "sensor.room_temperature"
+    )
+    endpoint = f"/api/v1/points/{p['id']}/overrides"
+    assert p["ontologyClass"] == "https://brickschema.org/schema/Brick#Temperature_Sensor"
+    assert p["ontologyClassProvenance"] == "home_assistant_inferred"
+
+    no_op_reset = client.delete(
+        f"/api/v1/points/{p['id']}/overrides/ontologyClass?revision={p['revision']}",
+        headers=auth,
+    )
+    assert no_op_reset.status_code == 422
+    assert client.get(f"/api/v1/points/{p['id']}", headers=auth).json()["revision"] == p["revision"]
+
+    invalid = client.patch(
+        endpoint,
+        headers=auth,
+        json={"revision": p["revision"], "ontologyClass": "Temperature Sensor"},
+    )
+    assert invalid.status_code == 422
+
+    uri = "https://brickschema.org/schema/Brick#CO2_Sensor"
+    valid = client.patch(
+        endpoint,
+        headers=auth,
+        json={"revision": p["revision"], "ontologyClass": uri},
+    )
+    assert valid.status_code == 200
+    assert valid.json()["ontologyClass"] == uri
+    assert valid.json()["ontologyClassProvenance"] == "one_os_override"
+
+    client.post("/api/v1/reconcile", headers=auth)
+    persisted = client.get(f"/api/v1/points/{p['id']}", headers=auth).json()
+    assert persisted["ontologyClass"] == uri
+    assert persisted["ontologyClassProvenance"] == "one_os_override"
 
 
 def test_selection_requires_review_and_control_remains_separate(client, auth):

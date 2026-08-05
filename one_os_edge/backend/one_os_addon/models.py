@@ -113,6 +113,7 @@ class Point(Base):
     display_unit: Mapped[str | None] = mapped_column(String)
     decimals: Mapped[int | None] = mapped_column(Integer)
     ontology_class: Mapped[str | None] = mapped_column(String)
+    ontology_class_source: Mapped[str] = mapped_column(String, default="unset")
     tags_json: Mapped[str] = mapped_column(Text, default="[]")
     evidence_json: Mapped[str] = mapped_column(Text, default="{}")
     evidence_hash: Mapped[str] = mapped_column(String, default="")

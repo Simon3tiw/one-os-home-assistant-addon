@@ -50,7 +50,30 @@ def evidence(entity, state):
         "step": attrs.get("step"),
         "options": attrs.get("options") or [],
         "entityCategory": entity.get("entity_category"),
+        "deviceClass": attrs.get("device_class"),
     }
+
+
+BRICK_BASE = "https://brickschema.org/schema/Brick#"
+DEVICE_CLASS_ONTOLOGY = {
+    "temperature": "Temperature_Sensor",
+    "humidity": "Relative_Humidity_Sensor",
+    "carbon_dioxide": "CO2_Sensor",
+    "power": "Power_Sensor",
+    "energy": "Energy_Sensor",
+    "occupancy": "Occupancy_Sensor",
+    "illuminance": "Illuminance_Sensor",
+    "pressure": "Pressure_Sensor",
+    "atmospheric_pressure": "Pressure_Sensor",
+    "voltage": "Voltage_Sensor",
+    "current": "Current_Sensor",
+    "frequency": "Frequency_Sensor",
+}
+
+
+def infer_ontology_class(ev):
+    brick_class = DEVICE_CLASS_ONTOLOGY.get(ev.get("deviceClass"))
+    return f"{BRICK_BASE}{brick_class}" if brick_class else None
 
 
 ADAPTER_VERSION = "ha-2025.1-v2"
@@ -251,6 +274,16 @@ def reconcile(db: Session, snapshot: dict, actor="system"):
             )
             db.add(asset)
             db.flush()
+        else:
+            asset_changed = (
+                asset.source_space_id != source_space.id
+                or (not asset.placement_override and asset.space_id != source_space.id)
+                or asset.placement_conflict != placement_conflict
+                or (not asset.name_override and asset.name != physical.name)
+                or asset.lifecycle == "missing"
+            )
+            if asset_changed:
+                asset.revision += 1
         asset.source_space_id = source_space.id
         if not asset.placement_override:
             asset.space_id = source_space.id
@@ -269,6 +302,7 @@ def reconcile(db: Session, snapshot: dict, actor="system"):
         if not asset:
             asset = db.scalar(select(Asset).where(Asset.source_key == key + ":asset"))
             source_space = spaces.get(entity.get("area_id"), unassigned_space)
+            asset_is_new = asset is None
             if not asset:
                 asset = Asset(
                     id=uid("ast"),
@@ -280,16 +314,29 @@ def reconcile(db: Session, snapshot: dict, actor="system"):
                 )
                 db.add(asset)
                 db.flush()
+            entity_asset_conflict = bool(
+                entity.get("area_id") and entity.get("area_id") not in spaces
+            )
+            entity_asset_name = entity.get("name") or entity["entity_id"]
+            if not asset_is_new and (
+                asset.source_space_id != source_space.id
+                or (not asset.placement_override and asset.space_id != source_space.id)
+                or asset.placement_conflict != entity_asset_conflict
+                or (not asset.name_override and asset.name != entity_asset_name)
+                or asset.lifecycle == "missing"
+            ):
+                asset.revision += 1
             asset.source_space_id = source_space.id
             if not asset.placement_override:
                 asset.space_id = source_space.id
-            asset.placement_conflict = bool(
-                entity.get("area_id") and entity.get("area_id") not in spaces
-            )
+            asset.placement_conflict = entity_asset_conflict
+            if not asset.name_override:
+                asset.name = entity_asset_name
             if asset.lifecycle != "archived":
                 asset.lifecycle = "active"
             seen_assets.add(key + ":asset")
         point = db.scalar(select(Point).where(Point.source_key == key))
+        binding_rebound = False
         if not point:
             point = db.scalar(
                 select(Point).where(
@@ -298,6 +345,7 @@ def reconcile(db: Session, snapshot: dict, actor="system"):
                 )
             )
             if point:
+                binding_rebound = True
                 point.source_key = key
                 point.binding_stability = "stable"
                 point.temporary_accepted = False
@@ -309,6 +357,8 @@ def reconcile(db: Session, snapshot: dict, actor="system"):
         ev_json = json.dumps(ev, sort_keys=True, separators=(",", ":"))
         ev_hash = hashlib.sha256(ev_json.encode()).hexdigest()
         cap = project_capability(ev)
+        inferred_ontology = infer_ontology_class(ev)
+        inferred_source = "home_assistant_inferred" if inferred_ontology else "unset"
         source_device = next(
             (device for device in snapshot["devices"] if device["id"] == entity.get("device_id")),
             None,
@@ -335,18 +385,41 @@ def reconcile(db: Session, snapshot: dict, actor="system"):
                 evidence_json=ev_json,
                 evidence_hash=ev_hash,
                 capability_json=json.dumps(cap),
+                ontology_class=inferred_ontology,
+                ontology_class_source=inferred_source,
                 placement_conflict=point_placement_conflict,
             )
             db.add(point)
             db.flush()
         else:
+            desired_source_name = (
+                attrs.get("friendly_name") or entity.get("name") or entity["entity_id"]
+            )
+            desired_source_unit = attrs.get("unit_of_measurement")
+            desired_attributes_json = json.dumps(attrs)
+            desired_updated_at = (state or {}).get("last_updated")
+            desired_capability_json = json.dumps(cap)
+            ontology_changed = point.ontology_class_source != "one_os_override" and (
+                point.ontology_class != inferred_ontology
+                or point.ontology_class_source != inferred_source
+            )
             changed = (
-                point.evidence_hash != ev_hash
+                binding_rebound
+                or point.evidence_hash != ev_hash
+                or point.source_asset_id != asset.id
+                or point.registry_id != entity["entity_id"]
+                or point.current_entity_id != entity["entity_id"]
+                or point.source_name != desired_source_name
+                or point.source_unit != desired_source_unit
                 or point.raw_value != (state or {}).get("state")
+                or point.attributes_json != desired_attributes_json
+                or point.updated_at != desired_updated_at
                 or point.quality != quality(state)
-                or point.lifecycle in {"missing", "archived"}
+                or point.capability_json != desired_capability_json
+                or point.lifecycle == "missing"
                 or (point.asset_id != asset.id and not point.placement_override)
                 or point.placement_conflict != point_placement_conflict
+                or ontology_changed
             )
             if point.evidence_hash and point.evidence_hash != ev_hash:
                 point.cloud_control_enabled = False
@@ -357,17 +430,18 @@ def reconcile(db: Session, snapshot: dict, actor="system"):
             point.placement_conflict = point_placement_conflict
             point.registry_id = entity["entity_id"]
             point.current_entity_id = entity["entity_id"]
-            point.source_name = (
-                attrs.get("friendly_name") or entity.get("name") or entity["entity_id"]
-            )
-            point.source_unit = attrs.get("unit_of_measurement")
+            point.source_name = desired_source_name
+            point.source_unit = desired_source_unit
             point.raw_value = (state or {}).get("state")
-            point.attributes_json = json.dumps(attrs)
-            point.updated_at = (state or {}).get("last_updated")
+            point.attributes_json = desired_attributes_json
+            point.updated_at = desired_updated_at
             point.quality = quality(state)
             point.evidence_json = ev_json
             point.evidence_hash = ev_hash
-            point.capability_json = json.dumps(cap)
+            point.capability_json = desired_capability_json
+            if point.ontology_class_source != "one_os_override":
+                point.ontology_class = inferred_ontology
+                point.ontology_class_source = inferred_source
             if point.lifecycle != "archived":
                 if point.lifecycle == "missing":
                     changed = True
@@ -394,6 +468,7 @@ def reconcile(db: Session, snapshot: dict, actor="system"):
             key = "temporary:" + state_id
             if key not in seen_points:
                 asset = db.scalar(select(Asset).where(Asset.source_key == key + ":asset"))
+                asset_is_new = asset is None
                 if not asset:
                     asset = Asset(
                         id=uid("ast"),
@@ -405,6 +480,12 @@ def reconcile(db: Session, snapshot: dict, actor="system"):
                     )
                     db.add(asset)
                     db.flush()
+                if not asset_is_new and (
+                    asset.source_space_id != unassigned_space.id
+                    or (not asset.placement_override and asset.space_id != unassigned_space.id)
+                    or asset.lifecycle == "missing"
+                ):
+                    asset.revision += 1
                 asset.source_space_id = unassigned_space.id
                 if not asset.placement_override:
                     asset.space_id = unassigned_space.id
@@ -415,6 +496,8 @@ def reconcile(db: Session, snapshot: dict, actor="system"):
                 ev_json = json.dumps(ev, sort_keys=True, separators=(",", ":"))
                 ev_hash = hashlib.sha256(ev_json.encode()).hexdigest()
                 cap = project_capability(ev)
+                inferred_ontology = infer_ontology_class(ev)
+                inferred_source = "home_assistant_inferred" if inferred_ontology else "unset"
                 point = db.scalar(select(Point).where(Point.source_key == key))
                 if not point:
                     point = Point(
@@ -433,16 +516,33 @@ def reconcile(db: Session, snapshot: dict, actor="system"):
                         evidence_json=ev_json,
                         evidence_hash=ev_hash,
                         capability_json=json.dumps(cap),
+                        ontology_class=inferred_ontology,
+                        ontology_class_source=inferred_source,
                         binding_stability="temporary",
                     )
                     db.add(point)
                 else:
+                    desired_source_unit = state.get("attributes", {}).get("unit_of_measurement")
+                    desired_attributes_json = json.dumps(state.get("attributes", {}))
+                    desired_capability_json = json.dumps(cap)
+                    ontology_changed = point.ontology_class_source != "one_os_override" and (
+                        point.ontology_class != inferred_ontology
+                        or point.ontology_class_source != inferred_source
+                    )
                     changed = (
                         point.evidence_hash != ev_hash
+                        or point.source_asset_id != asset.id
+                        or point.current_entity_id != state_id
+                        or point.source_name != state_id
+                        or point.source_unit != desired_source_unit
                         or point.raw_value != state["state"]
+                        or point.attributes_json != desired_attributes_json
+                        or point.updated_at != state.get("last_updated")
                         or point.quality != quality(state)
-                        or point.lifecycle in {"missing", "archived"}
+                        or point.capability_json != desired_capability_json
+                        or point.lifecycle == "missing"
                         or (point.asset_id != asset.id and not point.placement_override)
+                        or ontology_changed
                     )
                     if point.evidence_hash and point.evidence_hash != ev_hash:
                         point.cloud_control_enabled = False
@@ -452,17 +552,19 @@ def reconcile(db: Session, snapshot: dict, actor="system"):
                         point.asset_id = asset.id
                     point.current_entity_id = state_id
                     point.source_name = state_id
-                    point.source_unit = state.get("attributes", {}).get("unit_of_measurement")
+                    point.source_unit = desired_source_unit
                     point.raw_value = state["state"]
-                    point.attributes_json = json.dumps(state.get("attributes", {}))
+                    point.attributes_json = desired_attributes_json
                     point.updated_at = state.get("last_updated")
                     point.quality = quality(state)
                     point.evidence_json = ev_json
                     point.evidence_hash = ev_hash
-                    point.capability_json = json.dumps(cap)
-                    if point.lifecycle == "missing":
-                        changed = True
-                    point.lifecycle = "active"
+                    point.capability_json = desired_capability_json
+                    if point.ontology_class_source != "one_os_override":
+                        point.ontology_class = inferred_ontology
+                        point.ontology_class_source = inferred_source
+                    if point.lifecycle != "archived":
+                        point.lifecycle = "active"
                     if changed:
                         point.revision += 1
                 db.flush()

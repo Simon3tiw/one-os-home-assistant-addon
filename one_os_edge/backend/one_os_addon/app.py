@@ -17,7 +17,7 @@ from alembic.config import Config
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import create_engine, event, func, select
 from sqlalchemy.orm import sessionmaker
 
@@ -36,7 +36,7 @@ from .models import (
     SyncRun,
     uid,
 )
-from .reconciliation import reconcile
+from .reconciliation import infer_ontology_class, reconcile
 from .sync import SyncCoordinator
 
 
@@ -47,6 +47,21 @@ class OverrideBody(BaseModel):
     decimals: int | None = None
     ontologyClass: str | None = None
     tags: list[str] | None = None
+
+    @field_validator("ontologyClass")
+    @classmethod
+    def validate_ontology_class(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value or len(value) > 512:
+            raise ValueError("ontologyClass must be a non-empty URI of at most 512 characters")
+        parsed = urlparse(value)
+        if parsed.scheme == "https" and parsed.netloc:
+            return value
+        if parsed.scheme == "urn" and parsed.path:
+            return value
+        raise ValueError("ontologyClass must be an absolute HTTPS or URN URI")
 
 
 class SelectionBody(BaseModel):
@@ -256,6 +271,7 @@ def point_json(point):
             "updatedAt": point.updated_at,
         },
         "ontologyClass": point.ontology_class,
+        "ontologyClassProvenance": point.ontology_class_source,
         "tags": json.loads(point.tags_json),
         "evidence": json.loads(point.evidence_json),
         "capability": json.loads(point.capability_json),
@@ -263,6 +279,7 @@ def point_json(point):
 
 
 def inventory(db):
+    site = db.scalar(select(Site).limit(1))
     structures = []
     flat = []
     for s in db.scalars(
@@ -300,6 +317,7 @@ def inventory(db):
                 assets.append(
                     {
                         "id": a.id,
+                        "spaceId": a.space_id,
                         "name": a.name,
                         "type": a.type,
                         "revision": a.revision,
@@ -356,7 +374,12 @@ def inventory(db):
         ),
         "points": db.scalar(select(func.count()).select_from(Point)),
     }
-    return {"structures": structures, "flatPoints": flat, "counts": counts}
+    return {
+        "site": {"id": site.id, "name": site.name} if site else None,
+        "structures": structures,
+        "flatPoints": flat,
+        "counts": counts,
+    }
 
 
 def create_app(
@@ -547,6 +570,8 @@ def create_app(
                 if value is not None:
                     setattr(p, field, value)
                     fields.append(field)
+            if body.ontologyClass is not None:
+                p.ontology_class_source = "one_os_override"
             if body.tags is not None:
                 p.tags_json = json.dumps(body.tags)
                 fields.append("tags")
@@ -570,7 +595,14 @@ def create_app(
             p = s.get(Point, point_id)
             if not p or p.revision != revision:
                 raise HTTPException(409)
-            setattr(p, mapping[field], "[]" if field == "tags" else None)
+            if field == "ontologyClass":
+                if p.ontology_class_source != "one_os_override":
+                    raise HTTPException(422, "ontology_override_required")
+                inferred = infer_ontology_class(json.loads(p.evidence_json))
+                p.ontology_class = inferred
+                p.ontology_class_source = "home_assistant_inferred" if inferred else "unset"
+            else:
+                setattr(p, mapping[field], "[]" if field == "tags" else None)
             p.revision += 1
             audit(s, request, "point.override.reset", p.id, p.revision, [field])
             s.commit()
@@ -661,7 +693,7 @@ def create_app(
                 raise HTTPException(404)
             if point.revision != body.revision:
                 raise HTTPException(409, detail={"code": "revision_conflict"})
-            if target.lifecycle == "archived":
+            if point.lifecycle != "active" or target.lifecycle != "active":
                 raise HTTPException(422, detail={"code": "invalid_asset"})
             point.asset_id = target.id
             point.placement_override = True
@@ -697,6 +729,8 @@ def create_app(
                 raise HTTPException(404)
             if asset.revision != body.revision:
                 raise HTTPException(409, detail={"code": "revision_conflict"})
+            if asset.lifecycle != "active":
+                raise HTTPException(422, detail={"code": "invalid_asset"})
             fields = []
             if body.name is not None:
                 asset.name = body.name
@@ -707,7 +741,7 @@ def create_app(
                 fields.append("type")
             if body.spaceId is not None:
                 target = s.get(Space, body.spaceId)
-                if not target or target.lifecycle == "archived":
+                if not target or target.lifecycle != "active":
                     raise HTTPException(422, detail={"code": "invalid_space"})
                 asset.space_id = target.id
                 asset.placement_override = True
@@ -1091,12 +1125,12 @@ def create_app(
             last = s.scalar(select(SyncRun).order_by(SyncRun.at.desc()))
             return {
                 "schemaVersion": "1.0",
-                "softwareVersion": "0.1.2",
+                "softwareVersion": "0.1.4",
                 "architecture": platform.machine(),
                 "installationHash": hashlib.sha256(
                     (site.installation_id if site else "uninitialized").encode()
                 ).hexdigest(),
-                "databaseRevision": "0002",
+                "databaseRevision": "0003",
                 "connectorPresence": app.state.ha.connector_presence,
                 "lastSync": {
                     "at": last.at.isoformat() if last else None,

@@ -4,6 +4,14 @@ test('portrait inventory uses the full viewport without clipped horizontal conte
   await page.setViewportSize({width: 390, height: 844})
   await page.goto('./')
   await page.getByText('Inventaris & ontologie').click()
+  const roomDisclosure = page.getByRole('button', {name: /Ruimte Office uitklappen/})
+  const roomTarget = await roomDisclosure.boundingBox()
+  expect(roomTarget?.width).toBeGreaterThanOrEqual(44)
+  expect(roomTarget?.height).toBeGreaterThanOrEqual(44)
+  await roomDisclosure.click()
+  await page.locator('.site-row b').evaluate((element) => {
+    element.textContent = 'ONE.OS zeer lange Home Assistant sitenaam zonder natuurlijke korte afbreking voor mobiel commissioninggebruik'
+  })
 
   const disclosure = page.getByRole('button', {name: /Uitklappen Office multisensor/})
   await expect(disclosure).toBeVisible()
@@ -35,6 +43,17 @@ test('portrait inventory uses the full viewport without clipped horizontal conte
     }),
   )
   expect(navigationFits).toBe(true)
+
+  const deviceTarget = await disclosure.boundingBox()
+  expect(deviceTarget?.width).toBeGreaterThanOrEqual(44)
+  expect(deviceTarget?.height).toBeGreaterThanOrEqual(44)
+  await disclosure.click()
+  await page.getByRole('button', {name: /Room temperature/}).click()
+  const expandedPageWidth = await page.evaluate(() => ({
+    client: document.documentElement.clientWidth,
+    scroll: document.documentElement.scrollWidth,
+  }))
+  expect(expandedPageWidth.scroll).toBeLessThanOrEqual(expandedPageWidth.client)
 })
 
 test('isolated non-root commissioning journey against a real backend process', async ({page}) => {
@@ -45,15 +64,18 @@ test('isolated non-root commissioning journey against a real backend process', a
   await page.getByRole('button', {name: 'Nu ontdekken'}).click()
   await expect(page.getByText('Ground floor')).toBeVisible()
 
+  await page.getByRole('button', {name: /Ruimte Office uitklappen/}).click()
   await page.getByRole('button', {name: /Uitklappen Office multisensor/}).click()
   await page.getByRole('button', {name: /Room temperature/}).click()
   await expect(page.getByText(/21,24 °C|21,2 °C/).last()).toBeVisible()
+  await expect(page.getByText('Temperatuursensor', {exact: true}).first()).toBeVisible()
+  await expect(page.getByText('Automatisch afgeleid uit Home Assistant')).toBeVisible()
 
-  const nameField = page.getByLabel(/Weergavenaam/)
+  const nameField = page.getByLabel(/Pointnaam/)
   await expect(nameField).toBeVisible()
   await nameField.fill('Persistent fixture')
   await page.getByRole('button', {name: 'Overrides opslaan'}).click()
-  await expect(page.getByLabel(/Weergavenaam/)).toHaveValue('Persistent fixture', {timeout: 15000})
+  await expect(page.getByLabel(/Pointnaam/)).toHaveValue('Persistent fixture', {timeout: 15000})
 
   await page.getByRole('checkbox', {name: /Selecteer Office multisensor/}).click()
   await expect(page.getByRole('dialog', {name: 'Beoordelen en selecteren'})).toBeVisible()
@@ -65,10 +87,12 @@ test('isolated non-root commissioning journey against a real backend process', a
   // browser reload driven entirely by server state (no client cache).
   await page.reload()
   await page.getByText('Inventaris & ontologie').click()
+  await page.getByRole('button', {name: /Ruimte Office uitklappen/}).click()
   await page.getByRole('button', {name: /Uitklappen Office multisensor/}).click()
   await expect(page.getByText('Persistent fixture')).toBeVisible()
   await page.getByRole('button', {name: /Persistent fixture/}).click()
-  await expect(page.getByLabel(/Weergavenaam/)).toHaveValue('Persistent fixture')
+  await expect(page.getByLabel(/Pointnaam/)).toHaveValue('Persistent fixture')
+  await expect(page.getByText('Automatisch afgeleid uit Home Assistant')).toBeVisible()
 
   await page.getByText('Diagnostiek').click()
   await expect(page.getByText('Systeemstatus & audit')).toBeVisible()

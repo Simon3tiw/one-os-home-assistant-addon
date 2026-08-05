@@ -39,6 +39,54 @@ def test_v1_to_v2_migration_preserves_property_and_adds_constraints(tmp_path):
         }
 
 
+def test_v2_to_v3_migration_backfills_ontology_provenance_and_downgrades(tmp_path):
+    import sqlite3
+    from contextlib import closing
+
+    from alembic import command
+    from alembic.config import Config
+
+    database = tmp_path / "ontology-upgrade.db"
+    config = Config("one_os_edge/alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite:///{database}")
+    command.upgrade(config, "0002")
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute(
+            "INSERT INTO points("
+            "id,asset_id,source_key,registry_id,current_entity_id,source_name,ontology_class"
+            ") "
+            "VALUES(?,?,?,?,?,?,?)",
+            (
+                "point_v2",
+                "legacy_asset",
+                "ha:entity:sensor.legacy",
+                "sensor.legacy",
+                "sensor.legacy",
+                "Legacy sensor",
+                "https://brickschema.org/schema/Brick#Temperature_Sensor",
+            ),
+        )
+        connection.commit()
+
+    command.upgrade(config, "head")
+    command.upgrade(config, "head")
+    with closing(sqlite3.connect(database)) as connection:
+        assert connection.execute(
+            "SELECT ontology_class, ontology_class_source FROM points WHERE id='point_v2'"
+        ).fetchone() == (
+            "https://brickschema.org/schema/Brick#Temperature_Sensor",
+            "one_os_override",
+        )
+
+    command.downgrade(config, "0002")
+    with closing(sqlite3.connect(database)) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(points)")}
+        assert "ontology_class_source" not in columns
+        assert connection.execute(
+            "SELECT ontology_class FROM points WHERE id='point_v2'"
+        ).fetchone() == ("https://brickschema.org/schema/Brick#Temperature_Sensor",)
+
+
 def test_diagnostics_is_allowlist_only_and_audit_is_safe(client, auth, fake_ha):
     fake_ha.states["sensor.room_temperature"]["state"] = "CANARY_SECRET_STATE"
     client.post("/api/v1/reconcile", headers=auth)
@@ -54,6 +102,7 @@ def test_diagnostics_is_allowlist_only_and_audit_is_safe(client, auth, fake_ha):
         "counts",
         "storage",
     }
+    assert diag.json()["softwareVersion"] == "0.1.4"
     assert "CANARY" not in diag.text and "sensor.room_temperature" not in diag.text
     assert all(
         set(row) <= {"actorId", "at", "action", "objectId", "revision", "fields"}
@@ -242,7 +291,7 @@ def test_cold_backup_restore_preserves_complete_commissioning_state(tmp_path, fa
         } == expected_audit_actions
     restored_app.state.engine.dispose()
     with closing(sqlite3.connect(restored)) as connection:
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0002",)
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0003",)
 
 
 def test_app_database_is_migrated_to_alembic_head(tmp_path, fake_ha):
@@ -255,4 +304,4 @@ def test_app_database_is_migrated_to_alembic_head(tmp_path, fake_ha):
     app = create_app(database_url=f"sqlite:///{database}", ha_client=fake_ha)
     app.state.engine.dispose()
     with closing(sqlite3.connect(database)) as connection:
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0002",)
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0003",)

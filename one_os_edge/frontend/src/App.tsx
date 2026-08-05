@@ -9,8 +9,86 @@ type ArchiveDialog = {kind: 'assets' | 'spaces' | 'structures'; id: string; name
 type SplitDialog = {asset: Asset}
 type MergeDialog = {asset: Asset; targets: Asset[]}
 
+const BRICK_BASE = 'https://brickschema.org/schema/Brick#'
+const ONTOLOGY_OPTIONS = [
+  ['Temperatuursensor', `${BRICK_BASE}Temperature_Sensor`],
+  ['Relatieve-vochtigheidssensor', `${BRICK_BASE}Relative_Humidity_Sensor`],
+  ['CO₂-sensor', `${BRICK_BASE}CO2_Sensor`],
+  ['Vermogenssensor', `${BRICK_BASE}Power_Sensor`],
+  ['Energiemeter', `${BRICK_BASE}Energy_Sensor`],
+  ['Bezettingssensor', `${BRICK_BASE}Occupancy_Sensor`],
+  ['Verlichtingssterktesensor', `${BRICK_BASE}Illuminance_Sensor`],
+  ['Druksensor', `${BRICK_BASE}Pressure_Sensor`],
+  ['Luchtdebietsensor', `${BRICK_BASE}Air_Flow_Sensor`],
+  ['Waterdebietsensor', `${BRICK_BASE}Water_Flow_Sensor`],
+  ['Spanningssensor', `${BRICK_BASE}Voltage_Sensor`],
+  ['Stroomsensor', `${BRICK_BASE}Current_Sensor`],
+  ['Frequentiesensor', `${BRICK_BASE}Frequency_Sensor`],
+  ['Temperatuursetpoint', `${BRICK_BASE}Temperature_Setpoint`],
+  ['Aan/uit-status', `${BRICK_BASE}On_Off_Status`],
+  ['Alarm', `${BRICK_BASE}Alarm`],
+] as const
+
+function ontologyLabel(uri: string | null) {
+  if (!uri) return 'Nog niet geclassificeerd'
+  const known = ONTOLOGY_OPTIONS.find((option) => option[1] === uri)
+  if (known) return known[0]
+  const tail = uri.split(/[/#]/).filter(Boolean).at(-1)
+  return tail?.replaceAll('_', ' ') ?? uri
+}
+
+function ontologyChoice(value: string | null | undefined) {
+  if (!value) return ''
+  return ONTOLOGY_OPTIONS.some(([, uri]) => uri === value) ? value : '__custom__'
+}
+
 function flattenAssets(inventory: Inventory): Asset[] {
-  return inventory.structures.flatMap((s) => s.spaces.flatMap((sp) => sp.assets))
+  return inventory.structures
+    .filter((structure) => structure.sourceLifecycle === 'active')
+    .flatMap((structure) =>
+      structure.spaces
+        .filter((space) => space.sourceLifecycle === 'active')
+        .flatMap((space) => space.assets.filter((asset) => asset.sourceLifecycle === 'active')),
+    )
+}
+
+function spaceOptions(inventory: Inventory) {
+  return inventory.structures
+    .filter((structure) => structure.sourceLifecycle === 'active')
+    .flatMap((structure) =>
+      structure.spaces
+        .filter((space) => space.sourceLifecycle === 'active')
+        .map((space) => ({id: space.id, label: `${structure.name} / ${space.name}`})),
+    )
+}
+
+function assetOptions(inventory: Inventory) {
+  return inventory.structures
+    .filter((structure) => structure.sourceLifecycle === 'active')
+    .flatMap((structure) =>
+      structure.spaces
+        .filter((space) => space.sourceLifecycle === 'active')
+        .flatMap((space) =>
+          space.assets
+            .filter((asset) => asset.sourceLifecycle === 'active')
+            .map((asset) => ({
+              id: asset.id,
+              label: `${structure.name} / ${space.name} / ${asset.name}`,
+            })),
+        ),
+    )
+}
+
+function pointLocationPath(inventory: Inventory, point: Point | null) {
+  if (!point) return ''
+  for (const structure of inventory.structures) {
+    for (const space of structure.spaces) {
+      if (space.assets.some((asset) => asset.id === point.assetId)) {
+        return [inventory.site?.name, structure.name, space.name].filter(Boolean).join(' / ')
+      }
+    }
+  }
+  return inventory.site?.name ?? 'Niet toegewezen'
 }
 
 function matchesQuery(text: string, query: string) {
@@ -128,6 +206,32 @@ export function App() {
     }
   }
 
+  async function moveAsset(asset: Asset, spaceId: string) {
+    if (spaceId === asset.spaceId) return
+    setBusy(true)
+    try {
+      await client.moveAsset(asset.id, asset.revision, spaceId)
+      await refreshInventory()
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function movePoint(assetId: string) {
+    if (!selected || assetId === selected.assetId) return
+    setBusy(true)
+    try {
+      const updated = await client.movePoint(selected.id, selected.revision, assetId)
+      await refreshInventory(updated)
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function runReconcile() {
     setBusy(true)
     try {
@@ -181,6 +285,7 @@ export function App() {
     displayName?: string
     displayUnit?: string
     decimals?: number
+    ontologyClass?: string
   }) {
     if (!selected) return
     setBusy(true)
@@ -419,6 +524,12 @@ export function App() {
               </div>
               {visibleStructures.length === 0 && <p className="empty">Geen overeenkomende objecten.</p>}
               <div className="tree">
+                <div className="site-root">
+                  <div className="site-row">
+                    <span className="node-kind">SI</span>
+                    <b>{inventory.site?.name ?? 'Lokale Site'}</b>
+                    <small>Site · {visibleStructures.length} structuren</small>
+                  </div>
                 {visibleStructures.map((s) => (
                   <StructureNode
                     key={s.id}
@@ -426,6 +537,8 @@ export function App() {
                     expandMatches={Boolean(query || onlyUnreviewed || onlySelected)}
                     selectedPointId={selected?.id ?? null}
                     onSelectPoint={setSelected}
+                    spaceOptions={spaceOptions(inventory)}
+                    onMoveAsset={moveAsset}
                     onSelectAsset={(asset) =>
                       setSelectionDialog({kind: 'asset', id: asset.id, name: asset.name})
                     }
@@ -445,12 +558,16 @@ export function App() {
                     }
                   />
                 ))}
+                </div>
               </div>
             </div>
             <Inspector
               point={selected}
               properties={properties}
               busy={busy}
+              locationPath={pointLocationPath(inventory, selected)}
+              assetOptions={assetOptions(inventory)}
+              onMovePoint={movePoint}
               onSave={saveOverrides}
               onReset={resetField}
               onControl={toggleControl}
@@ -500,6 +617,8 @@ function StructureNode({
   expandMatches,
   selectedPointId,
   onSelectPoint,
+  spaceOptions,
+  onMoveAsset,
   onSelectAsset,
   onExcludeAsset,
   onSelectSpace,
@@ -512,6 +631,8 @@ function StructureNode({
   expandMatches: boolean
   selectedPointId: string | null
   onSelectPoint: (p: Point) => void
+  spaceOptions: {id: string; label: string}[]
+  onMoveAsset: (asset: Asset, spaceId: string) => void
   onSelectAsset: (a: Asset) => void
   onExcludeAsset: (a: Asset) => void
   onSelectSpace: (s: Space) => void
@@ -520,7 +641,17 @@ function StructureNode({
   onMerge: (a: Asset) => void
   onArchiveAsset: (a: Asset) => void
 }) {
+  const [expandedSpaces, setExpandedSpaces] = useState<Set<string>>(() => new Set())
   const [expandedAssets, setExpandedAssets] = useState<Set<string>>(() => new Set())
+
+  function toggleSpace(spaceId: string) {
+    setExpandedSpaces((current) => {
+      const next = new Set(current)
+      if (next.has(spaceId)) next.delete(spaceId)
+      else next.add(spaceId)
+      return next
+    })
+  }
 
   function toggleAsset(assetId: string) {
     setExpandedAssets((current) => {
@@ -549,7 +680,20 @@ function StructureNode({
       </h3>
       {structure.spaces.map((sp) => (
         <div key={sp.id} className="node space">
-          <h4>
+          <div className="space-row">
+            <button
+              type="button"
+              className="space-disclosure"
+              aria-expanded={expandMatches || expandedSpaces.has(sp.id)}
+              aria-controls={`space-assets-${sp.id}`}
+              aria-label={`Ruimte ${sp.name} ${expandMatches || expandedSpaces.has(sp.id) ? 'inklappen' : 'uitklappen'}`}
+              disabled={expandMatches}
+              onClick={() => toggleSpace(sp.id)}
+            >
+              <svg aria-hidden="true" viewBox="0 0 16 16">
+                <path d="m5 3 5 5-5 5" />
+              </svg>
+            </button>
             <input
               type="checkbox"
               aria-label={`Selecteer ${sp.name}`}
@@ -559,10 +703,13 @@ function StructureNode({
               }}
               onChange={() => onSelectSpace(sp)}
             />
-            <span>SP</span>
-            {sp.name}
-            <small>{sp.type}</small>
-          </h4>
+            <span className="node-kind">SP</span>
+            <b>{sp.name}</b>
+            <small>
+              {sp.type} · {sp.assets.length} {sp.assets.length === 1 ? 'device' : 'devices'}
+            </small>
+          </div>
+          {(expandMatches || expandedSpaces.has(sp.id)) && <div className="space-assets" id={`space-assets-${sp.id}`}>
           {sp.assets.map((a) => (
             <div key={a.id} className="node asset">
               <div className="asset-row">
@@ -579,15 +726,19 @@ function StructureNode({
                     <path d="m5 3 5 5-5 5" />
                   </svg>
                 </button>
-                <input
-                  type="checkbox"
-                  aria-label={`Selecteer ${a.name}`}
-                  checked={a.selectionState === 'selected'}
-                  ref={(el) => {
-                    if (el) el.indeterminate = a.selectionState === 'partial'
-                  }}
-                  onChange={() => (a.selectionState === 'selected' ? onExcludeAsset(a) : onSelectAsset(a))}
-                />
+                <label className="cloud-selection">
+                  <input
+                    type="checkbox"
+                    aria-label={`Selecteer ${a.name} voor ONE.OS Cloud`}
+                    checked={a.selectionState === 'selected'}
+                    ref={(el) => {
+                      if (el) el.indeterminate = a.selectionState === 'partial'
+                    }}
+                    onChange={() => (a.selectionState === 'selected' ? onExcludeAsset(a) : onSelectAsset(a))}
+                  />
+                  <span>Cloud</span>
+                  <small>{a.selectionState === 'selected' ? 'aan' : a.selectionState === 'partial' ? 'deels' : 'uit'}</small>
+                </label>
                 <b>{a.name}</b>
                 <small>
                   {a.type} · {a.physicalDeviceId ? 'Fysiek apparaat gekoppeld' : 'Standalone'} · {a.points.length}{' '}
@@ -595,6 +746,16 @@ function StructureNode({
                 </small>
                 {(expandMatches || expandedAssets.has(a.id)) && (
                   <div className="asset-actions">
+                    <label className="asset-placement">
+                      Ruimte voor device {a.name}
+                      <select value={a.spaceId} onChange={(e) => onMoveAsset(a, e.target.value)}>
+                        {spaceOptions.map((option) => (
+                          <option key={option.id} value={option.id}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
                     <button type="button" onClick={() => onSplit(a)} disabled={a.points.length < 2}>
                       Splitsen
                     </button>
@@ -619,6 +780,7 @@ function StructureNode({
                       <span>
                         {p.display.name.value}
                         <small>{p.source.registryId}</small>
+                        <span className="ontology-name">{ontologyLabel(p.ontologyClass)}</span>
                       </span>
                       <em>{p.value.formatted}</em>
                       {p.sourceLifecycle !== 'active' && <mark>{p.sourceLifecycle}</mark>}
@@ -630,6 +792,7 @@ function StructureNode({
               )}
             </div>
           ))}
+          </div>}
         </div>
       ))}
     </div>
@@ -640,6 +803,9 @@ function Inspector({
   point,
   properties,
   busy,
+  locationPath,
+  assetOptions,
+  onMovePoint,
   onSave,
   onReset,
   onControl,
@@ -650,7 +816,10 @@ function Inspector({
   point: Point | null
   properties: Property[]
   busy: boolean
-  onSave: (form: {displayName?: string; displayUnit?: string; decimals?: number}) => void
+  locationPath: string
+  assetOptions: {id: string; label: string}[]
+  onMovePoint: (assetId: string) => void
+  onSave: (form: {displayName?: string; displayUnit?: string; decimals?: number; ontologyClass?: string}) => void
   onReset: (field: string) => void
   onControl: (enabled: boolean) => void
   onAcceptTemporary: () => void
@@ -659,6 +828,16 @@ function Inspector({
 }) {
   const [propertyKey, setPropertyKey] = useState('')
   const [propertyValue, setPropertyValue] = useState('')
+  const [selectedOntology, setSelectedOntology] = useState(() => ontologyChoice(point?.ontologyClass))
+  const [customOntology, setCustomOntology] = useState(() =>
+    ontologyChoice(point?.ontologyClass) === '__custom__' ? (point?.ontologyClass ?? '') : '',
+  )
+
+  useEffect(() => {
+    const choice = ontologyChoice(point?.ontologyClass)
+    setSelectedOntology(choice)
+    setCustomOntology(choice === '__custom__' ? (point?.ontologyClass ?? '') : '')
+  }, [point?.id, point?.ontologyClass])
 
   if (!point) {
     return (
@@ -675,11 +854,15 @@ function Inspector({
   function submit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault()
     const form = new FormData(e.currentTarget)
-    onSave({
+    const nextOntology =
+      selectedOntology === '__custom__' ? customOntology.trim() : selectedOntology || undefined
+    const payload: {displayName?: string; displayUnit?: string; decimals?: number; ontologyClass?: string} = {
       displayName: String(form.get('displayName') ?? ''),
       displayUnit: String(form.get('displayUnit') ?? '') || undefined,
       decimals: Number(form.get('decimals')),
-    })
+    }
+    if (nextOntology && nextOntology !== point?.ontologyClass) payload.ontologyClass = nextOntology
+    onSave(payload)
   }
 
   return (
@@ -687,6 +870,7 @@ function Inspector({
       <div className="eyebrow">POINT INSPECTOR</div>
       <h2>{point.display.name.value}</h2>
       <code>{point.id}</code>
+      <p className="location-path">{locationPath}</p>
       <div className="live">
         <span>Live waarde</span>
         <strong>{point.value.formatted}</strong>
@@ -702,9 +886,19 @@ function Inspector({
           </button>
         </div>
       )}
+      <label className="point-placement">
+        Device en locatie
+        <select value={point.assetId} onChange={(e) => onMovePoint(e.target.value)} disabled={busy}>
+          {assetOptions.map((option) => (
+            <option key={option.id} value={option.id}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </label>
       <form onSubmit={submit}>
         <label>
-          Weergavenaam
+          Pointnaam
           <input name="displayName" defaultValue={point.display.name.value} />
           <small>{point.display.name.provenance}</small>
         </label>
@@ -730,6 +924,43 @@ function Inspector({
         {point.display.decimals.provenance === 'one_os_override' && (
           <button type="button" onClick={() => onReset('decimals')}>
             Terugzetten naar bron
+          </button>
+        )}
+        <label>
+          Ontologyklasse
+          <select value={selectedOntology} onChange={(e) => setSelectedOntology(e.target.value)}>
+            {!point.ontologyClass && <option value="">Nog niet geclassificeerd</option>}
+            {ONTOLOGY_OPTIONS.map(([label, uri]) => (
+              <option key={uri} value={uri}>
+                {label}
+              </option>
+            ))}
+            <option value="__custom__">Anders…</option>
+          </select>
+          <small>Brick-compatible URI; los van Site, Floor en Room.</small>
+          <small>
+            {point.ontologyClassProvenance === 'one_os_override'
+              ? 'Handmatig aangepast in ONE.OS'
+              : point.ontologyClassProvenance === 'home_assistant_inferred'
+                ? 'Automatisch afgeleid uit Home Assistant'
+                : 'Geen automatische classificatie beschikbaar'}
+          </small>
+        </label>
+        {selectedOntology === '__custom__' && (
+          <label>
+            Eigen ontology-URI
+            <input
+              type="url"
+              required
+              value={customOntology}
+              onChange={(e) => setCustomOntology(e.target.value)}
+              placeholder="https://example.com/ontology#PointClass"
+            />
+          </label>
+        )}
+        {point.ontologyClassProvenance === 'one_os_override' && (
+          <button type="button" onClick={() => onReset('ontologyClass')}>
+            Ontologyklasse terugzetten
           </button>
         )}
         <button type="submit" disabled={busy}>
