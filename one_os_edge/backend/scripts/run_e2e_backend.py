@@ -19,7 +19,6 @@ import uvicorn
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BACKEND_ROOT))
 
-from one_os_addon.app import create_app  # noqa: E402
 from one_os_addon.ha.fake import FakeHomeAssistant  # noqa: E402
 
 E2E_CENTRAL_ORIGIN = "https://central.e2e.invalid:8443"
@@ -52,6 +51,9 @@ def main() -> None:
     origin = f"http://{host}:{port}"
 
     os.environ["STATIC_DIR"] = static_dir
+    os.environ["DATABASE_URL"] = database_url
+
+    from one_os_addon.app import create_app
 
     app = create_app(
         database_url=database_url,

@@ -54,7 +54,24 @@ test('portrait inventory uses the full viewport without clipped horizontal conte
   const pointSelectionBox = await mobilePointSelectionTarget.boundingBox()
   expect(pointSelectionBox?.width).toBeGreaterThanOrEqual(44)
   expect(pointSelectionBox?.height).toBeGreaterThanOrEqual(44)
-  await page.getByRole('button', {name: /Room temperature/}).click()
+
+  const mobilePoint = page.getByRole('button', {name: /Room temperature/})
+  await mobilePoint.locator('em').evaluate((element) => {
+    element.textContent = 'upstream-state-without-natural-breakpoints-that-must-not-collapse-the-point-name'
+  })
+  const pointContent = mobilePoint.locator(':scope > span').nth(1)
+  const pointValue = mobilePoint.locator('em')
+  const [pointBox, contentBox, valueBox] = await Promise.all([
+    mobilePoint.boundingBox(),
+    pointContent.boundingBox(),
+    pointValue.boundingBox(),
+  ])
+  expect((pointBox?.x ?? 0) + (pointBox?.width ?? 0)).toBeLessThanOrEqual(390)
+  expect(contentBox?.width).toBeGreaterThanOrEqual(120)
+  expect(contentBox?.width).toBeGreaterThanOrEqual((pointBox?.width ?? 0) - 50)
+  expect(valueBox?.y).toBeGreaterThanOrEqual((contentBox?.y ?? 0) + (contentBox?.height ?? 0))
+
+  await mobilePoint.click()
   const expandedPageWidth = await page.evaluate(() => ({
     client: document.documentElement.clientWidth,
     scroll: document.documentElement.scrollWidth,

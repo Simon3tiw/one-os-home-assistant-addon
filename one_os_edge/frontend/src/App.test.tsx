@@ -187,7 +187,7 @@ function mockApi(
         return new Response(
           JSON.stringify({
             schemaVersion: '1.0',
-            softwareVersion: '0.2.0',
+            softwareVersion: '0.2.1',
             architecture: 'amd64',
             installationHash: 'hash',
             databaseRevision: '0004',
@@ -561,7 +561,7 @@ describe('commissioning UI', () => {
     render(<App />)
     await u.click(await screen.findByText('Diagnostiek'))
     expect(await screen.findByText('Systeemstatus & audit')).toBeInTheDocument()
-    expect(await screen.findByText('0.2.0')).toBeInTheDocument()
+    expect(await screen.findByText('0.2.1')).toBeInTheDocument()
   })
 
   it('configures and tests the pinned ONE.OS Central destination in Dutch', async () => {
