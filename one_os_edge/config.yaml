@@ -1,5 +1,5 @@
 name: ONE.OS Edge Connector
-version: "0.2.1"
+version: "0.2.2"
 slug: one_os_edge
 description: Local read-only Home Assistant discovery and ONE.OS commissioning
 url: https://github.com/Simon3tiw/one-os-home-assistant-addon
@@ -14,3 +14,6 @@ homeassistant: "2025.1.0"
 hassio_api: true
 homeassistant_api: true
 backup: cold
+backup_exclude:
+  - identity
+  - identity/**

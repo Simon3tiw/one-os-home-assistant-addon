@@ -1279,7 +1279,7 @@ def create_app(
             last = s.scalar(select(SyncRun).order_by(SyncRun.at.desc()))
             return {
                 "schemaVersion": "1.0",
-                "softwareVersion": "0.2.1",
+                "softwareVersion": "0.2.2",
                 "architecture": platform.machine(),
                 "installationHash": hashlib.sha256(
                     (site.installation_id if site else "uninitialized").encode()
