@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://one-os.local/contracts/pairing/v1/pairing-v1.schema.json",
+  "title": "ONE.OS Pairing V1",
+  "$defs": {
+    "uuid": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+    "uint64": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+    "b64u32": {"type": "string", "pattern": "^[A-Za-z0-9_-]{43}$"},
+    "b64u64": {"type": "string", "pattern": "^[A-Za-z0-9_-]{86}$"},
+    "registrationRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["protocol","registrationRequestId","recoverySecret","mode","installationId","normalizedCode","edgeNonce","spkiDer","csrDer"],
+      "properties": {
+        "protocol": {"const": "1.0"}, "registrationRequestId": {"$ref": "#/$defs/uuid"},
+        "recoverySecret": {"$ref": "#/$defs/b64u32"}, "mode": {"enum": ["initial","repair"]},
+        "installationId": {"$ref": "#/$defs/uuid"},
+        "normalizedCode": {"type": "string", "pattern": "^[0-9A-HJKMNP-TV-Z]{20}$"},
+        "edgeNonce": {"$ref": "#/$defs/b64u32"},
+        "spkiDer": {"type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^[A-Za-z0-9_-]+$"},
+        "csrDer": {"type": "string", "minLength": 1, "maxLength": 8192, "pattern": "^[A-Za-z0-9_-]+$"}
+      }
+    },
+    "firstProofRequest": {
+      "type": "object", "additionalProperties": false, "required": ["normalizedCode","signature"],
+      "properties": {"normalizedCode": {"type": "string", "pattern": "^[0-9A-HJKMNP-TV-Z]{20}$"}, "signature": {"$ref": "#/$defs/b64u64"}}
+    },
+    "claimProofRequest": {
+      "type": "object", "additionalProperties": false, "required": ["claimRevision","signature"],
+      "properties": {"claimRevision": {"$ref": "#/$defs/uint64"}, "signature": {"$ref": "#/$defs/b64u64"}}
+    },
+    "certificateAckRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["protocol","sessionId","installationId","credentialId","certificateSha256","claimRevision","installationRevision","signature"],
+      "properties": {
+        "protocol": {"const": "1.0"}, "sessionId": {"$ref": "#/$defs/uuid"}, "installationId": {"$ref": "#/$defs/uuid"},
+        "credentialId": {"$ref": "#/$defs/uuid"}, "certificateSha256": {"$ref": "#/$defs/b64u32"},
+        "claimRevision": {"$ref": "#/$defs/uint64"}, "installationRevision": {"$ref": "#/$defs/uint64"},
+        "signature": {"$ref": "#/$defs/b64u64"}
+      }
+    },
+    "renewalRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["protocol","requestId","installationId","currentCredentialId","currentCertificateSha256","csrDer","csrSha256","edgeNonce","epochMinute","installationRevision","signature"],
+      "properties": {
+        "protocol": {"const": "1.0"}, "requestId": {"$ref": "#/$defs/uuid"},
+        "installationId": {"$ref": "#/$defs/uuid"}, "currentCredentialId": {"$ref": "#/$defs/uuid"},
+        "currentCertificateSha256": {"$ref": "#/$defs/b64u32"},
+        "csrDer": {"type": "string", "minLength": 1, "maxLength": 8192, "pattern": "^[A-Za-z0-9_-]+$"},
+        "csrSha256": {"$ref": "#/$defs/b64u32"}, "edgeNonce": {"$ref": "#/$defs/b64u32"},
+        "epochMinute": {"$ref": "#/$defs/uint64"}, "installationRevision": {"$ref": "#/$defs/uint64"},
+        "signature": {"$ref": "#/$defs/b64u64"}
+      }
+    },
+    "renewalAckRequest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["protocol","installationId","oldCredentialId","oldCertificateSha256","newCredentialId","newCertificateSha256","requestId","ackExpiresEpochSeconds","installationRevision","signature"],
+      "properties": {
+        "protocol": {"const": "1.0"}, "installationId": {"$ref": "#/$defs/uuid"},
+        "oldCredentialId": {"$ref": "#/$defs/uuid"}, "oldCertificateSha256": {"$ref": "#/$defs/b64u32"},
+        "newCredentialId": {"$ref": "#/$defs/uuid"}, "newCertificateSha256": {"$ref": "#/$defs/b64u32"},
+        "requestId": {"$ref": "#/$defs/uuid"}, "ackExpiresEpochSeconds": {"$ref": "#/$defs/uint64"},
+        "installationRevision": {"$ref": "#/$defs/uint64"}, "signature": {"$ref": "#/$defs/b64u64"}
+      }
+    },
+    "issuedResult": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sessionId","installationId","status","claimRevision","installationRevision","credentialId","certificatePem","certificateSha256","caChainPem","ackExpiresAt"],
+      "properties": {
+        "sessionId": {"$ref": "#/$defs/uuid"}, "installationId": {"$ref": "#/$defs/uuid"}, "status": {"const": "issued"},
+        "claimRevision": {"$ref": "#/$defs/uint64"}, "installationRevision": {"$ref": "#/$defs/uint64"},
+        "credentialId": {"$ref": "#/$defs/uuid"}, "certificatePem": {"type": "string", "minLength": 1, "maxLength": 16384},
+        "certificateSha256": {"$ref": "#/$defs/b64u32"}, "caChainPem": {"type": "string", "minLength": 1, "maxLength": 32768},
+        "ackExpiresAt": {"type": "string", "format": "date-time"}
+      }
+    }
+  }
+}

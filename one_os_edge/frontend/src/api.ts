@@ -121,13 +121,59 @@ export type CentralDestination = {
   status: 'not_configured' | 'configured'
 }
 
-export type CentralDiscoveryResult = {
+type CentralCapability =
+  | {pairingSupported: false; phase: '2B.1-sandbox-foundation'}
+  | {pairingSupported: true; phase: '2B.2-secure-pairing'}
+  | {pairingSupported: true; phase: '2B.3-selected-configuration-sync'}
+
+export type CentralDiscoveryResult = CentralCapability & {
   status: 'reachable'
   revision: number
-  service: string
+  service: 'one-os-central'
   schemaVersion: '1.0'
-  pairingSupported: false
-  phase: '2B.1-sandbox-foundation'
+}
+
+export function parseCentralDiscoveryResult(value: unknown): CentralDiscoveryResult {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('central_discovery_protocol_error')
+  }
+  const document = value as Record<string, unknown>
+  const keys = Object.keys(document).sort()
+  const expectedKeys = ['pairingSupported', 'phase', 'revision', 'schemaVersion', 'service', 'status']
+  const capability = `${String(document.pairingSupported)}:${String(document.phase)}`
+  if (
+    JSON.stringify(keys) !== JSON.stringify(expectedKeys) ||
+    document.status !== 'reachable' ||
+    !Number.isInteger(document.revision) ||
+    (document.revision as number) < 0 ||
+    document.service !== 'one-os-central' ||
+    document.schemaVersion !== '1.0' ||
+    ![
+      'false:2B.1-sandbox-foundation',
+      'true:2B.2-secure-pairing',
+      'true:2B.3-selected-configuration-sync',
+    ].includes(capability)
+  ) {
+    throw new Error('central_discovery_protocol_error')
+  }
+  return document as CentralDiscoveryResult
+}
+
+export type PairingStatus = {
+  installationId: string
+  status: string
+  codeExpiresAt?: string
+  tenantId?: string
+  siteId?: string
+  credentialId?: string
+  certificateSha256?: string
+  certificateNotAfter?: string
+  lastError?: string
+}
+
+export type PairingCode = {
+  code: string
+  expiresAt: string
 }
 
 const base = (path: string) => `./api/v1${path}`
@@ -147,7 +193,12 @@ export class ApiClient {
   }
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
-    const response = await fetch(base(path), init)
+    const response = await fetch(base(path), {
+      credentials: 'same-origin',
+      cache: 'no-store',
+      referrerPolicy: 'no-referrer',
+      ...init,
+    })
     if (response.status === 401 || response.status === 403) {
       this.onUnauthorized?.()
     }
@@ -296,8 +347,41 @@ export class ApiClient {
     return this.put<CentralDestination>('/central-destination', {revision, origin, certificateFingerprint})
   }
 
-  testCentralDestination() {
-    return this.post<CentralDiscoveryResult>('/central-destination/test', {})
+  async testCentralDestination() {
+    const result = await this.post<unknown>('/central-destination/test', {})
+    return parseCentralDiscoveryResult(result)
+  }
+
+  pairingStatus() {
+    return this.get<PairingStatus>('/pairing/status')
+  }
+
+  pairingCode() {
+    return this.get<PairingCode>('/pairing/code')
+  }
+
+  startPairing() {
+    return this.post<PairingStatus>('/pairing/start', {})
+  }
+
+  refreshPairing() {
+    return this.post<PairingStatus>('/pairing/refresh', {})
+  }
+
+  resetPairing() {
+    return this.post<void>('/pairing/reset', {})
+  }
+
+  cancelPairing() {
+    return this.post<PairingStatus>('/pairing/cancel', {confirmed: true})
+  }
+
+  rotatePairingKey() {
+    return this.post<PairingStatus>('/pairing/rotate-key', {confirmed: true})
+  }
+
+  replaceIdentityAfterRestore() {
+    return this.post<PairingStatus>('/pairing/replace-identity-after-restore', {confirmed: true})
   }
 
   archivePreview(kind: string, id: string) {

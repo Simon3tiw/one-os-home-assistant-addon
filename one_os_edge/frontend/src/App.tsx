@@ -13,6 +13,7 @@ import type {
   Structure,
 } from './api'
 import {Modal} from './Modal'
+import {PairingPanel} from './PairingPanel'
 
 type Section = 'overview' | 'inventory' | 'central' | 'diagnostics'
 type CentralStatus = 'not_configured' | 'unsaved' | 'configured' | 'reachable' | 'trust_error' | 'protocol_error' | 'unreachable'
@@ -537,9 +538,9 @@ export function App() {
           </a>
         </nav>
         <div className="phase">
-          Fase 2B.1
+          Fase 2B.3
           <br />
-          <small>Bestemming configureren; geen inventarispublicatie</small>
+          <small>Veilig koppelen en geselecteerde configuratie synchroniseren</small>
         </div>
       </aside>
       <main>
@@ -664,23 +665,26 @@ export function App() {
           </section>
         )}
         {section === 'central' && (
-          <CentralDestinationPanel
-            destination={centralDestination}
-            origin={centralOrigin}
-            fingerprint={centralFingerprint}
-            status={centralStatus}
-            busy={busy}
-            onOriginChange={(value) => {
-              setCentralOrigin(value)
-              setCentralStatus('unsaved')
-            }}
-            onFingerprintChange={(value) => {
-              setCentralFingerprint(value)
-              setCentralStatus('unsaved')
-            }}
-            onSave={saveCentralDestination}
-            onTest={testCentralDestination}
-          />
+          <>
+            <CentralDestinationPanel
+              destination={centralDestination}
+              origin={centralOrigin}
+              fingerprint={centralFingerprint}
+              status={centralStatus}
+              busy={busy}
+              onOriginChange={(value) => {
+                setCentralOrigin(value)
+                setCentralStatus('unsaved')
+              }}
+              onFingerprintChange={(value) => {
+                setCentralFingerprint(value)
+                setCentralStatus('unsaved')
+              }}
+              onSave={saveCentralDestination}
+              onTest={testCentralDestination}
+            />
+            <PairingPanel client={client} />
+          </>
         )}
         {section === 'diagnostics' && <DiagnosticsPanel diagnostics={diagnostics} audit={audit} />}
       </main>

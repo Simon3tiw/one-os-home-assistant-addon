@@ -6,7 +6,7 @@ from one_os_addon.models import Base
 from sqlalchemy import engine_from_config, pool
 
 config = context.config
-if os.getenv("DATABASE_URL"):
+if os.getenv("DATABASE_URL") and not config.attributes.get("explicit_database_url"):
     config.set_main_option("sqlalchemy.url", os.environ["DATABASE_URL"])
 if config.config_file_name:
     fileConfig(config.config_file_name)

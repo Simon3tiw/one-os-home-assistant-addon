@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "1.0",
+  "projection": {
+    "structures": [{"id":"structure-1","name":"Hoofdgebouw","ontologyClass":"Building"}],
+    "spaces": [{"id":"space-1","structureId":"structure-1","name":"Technische ruimte","ontologyClass":"MechanicalRoom"}],
+    "assets": [{"id":"asset-1","spaceId":"space-1","name":"Warmtepomp","ontologyClass":"HeatPump"}],
+    "points": [{"id":"point-1","assetId":"asset-1","name":"Aanvoertemperatuur","ontologyClass":"SupplyTemperature","valueType":"number","canonicalUnit":"Cel","displayUnit":"degC","decimals":1}]
+  },
+  "canonicalLength": 485,
+  "projectionSha256": "ofWKgQf4QOH_MfWwAK4uaXZBasZpiKfuIDOA0ZbUE2I"
+}

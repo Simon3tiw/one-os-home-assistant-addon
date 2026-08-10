@@ -2,7 +2,34 @@ import {afterEach, describe, expect, it, vi} from 'vitest'
 import {cleanup, render, screen, waitFor, within} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import {App} from './App'
-import {ApiClient} from './api'
+import {ApiClient, parseCentralDiscoveryResult} from './api'
+
+describe('Central discovery runtime contract', () => {
+  const base = {
+    status: 'reachable',
+    revision: 1,
+    service: 'one-os-central',
+    schemaVersion: '1.0',
+  }
+
+  it.each([
+    {pairingSupported: false, phase: '2B.1-sandbox-foundation'},
+    {pairingSupported: true, phase: '2B.2-secure-pairing'},
+    {pairingSupported: true, phase: '2B.3-selected-configuration-sync'},
+  ])('accepts a closed valid capability tuple', (capability) => {
+    expect(parseCentralDiscoveryResult({...base, ...capability})).toEqual({...base, ...capability})
+  })
+
+  it.each([
+    {...base, pairingSupported: false, phase: '2B.3-selected-configuration-sync'},
+    {...base, pairingSupported: true, phase: '2B.1-sandbox-foundation'},
+    {...base, pairingSupported: true, phase: '2B.3-selected-configuration-sync', extra: true},
+    {...base, revision: -1, pairingSupported: true, phase: '2B.3-selected-configuration-sync'},
+    {...base, service: 'other', pairingSupported: true, phase: '2B.3-selected-configuration-sync'},
+  ])('rejects malformed or mismatched discovery', (document) => {
+    expect(() => parseCentralDiscoveryResult(document)).toThrow('central_discovery_protocol_error')
+  })
+})
 
 afterEach(() => {
   cleanup()
@@ -122,11 +149,14 @@ function mockApi(
             connectorPresence: 'online',
             lastSync: null,
             counts: inventory.counts,
-            phaseNotice: 'Cloud pairing and data transport follow in Phase 2B/2C',
+            phaseNotice: 'Secure pairing and configuration sync are active; telemetry follows in Phase 2C',
             database: 'healthy',
           }),
         )
       if (url.endsWith('/inventory')) return new Response(JSON.stringify(inventory))
+      if (url.endsWith('/pairing/status')) {
+        return new Response(JSON.stringify({installationId: 'installation-test', status: 'unpaired'}))
+      }
       if (url.endsWith('/central-destination')) {
         if (method === 'PUT') {
           const body = JSON.parse(String(init?.body))
@@ -156,8 +186,8 @@ function mockApi(
             revision: 1,
             service: 'one-os-central',
             schemaVersion: '1.0',
-            pairingSupported: false,
-            phase: '2B.1-sandbox-foundation',
+            pairingSupported: true,
+            phase: '2B.3-selected-configuration-sync',
           }),
         )
       }
@@ -571,6 +601,8 @@ describe('commissioning UI', () => {
 
     await u.click(await screen.findByText('ONE.OS Central'))
     expect(await screen.findByText('Niet geconfigureerd')).toBeInTheDocument()
+    expect(await screen.findByRole('heading', {name: 'Edge pairing'})).toBeInTheDocument()
+    expect(await screen.findByText('unpaired')).toBeInTheDocument()
     await u.type(screen.getByLabelText('Serveradres'), 'https://central.example:8443')
     await u.type(screen.getByLabelText('Certificaatfingerprint (SHA-256)'), 'AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA:AA')
     await u.click(screen.getByRole('button', {name: 'Bestemming opslaan'}))

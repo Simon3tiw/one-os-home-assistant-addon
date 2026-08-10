@@ -10,6 +10,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -189,6 +190,82 @@ class CentralDestination(Base):
     configured_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=now
     )
+
+
+class EdgeIdentity(Base):
+    __tablename__ = "edge_identity"
+    __table_args__ = (CheckConstraint("id = 1", name="ck_edge_identity_singleton"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    installation_id: Mapped[str] = mapped_column(String(36), nullable=False, unique=True)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, default="unpaired")
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    active_spki_sha256: Mapped[str | None] = mapped_column(String(43))
+    credential_id: Mapped[str | None] = mapped_column(String(36))
+    certificate_sha256: Mapped[str | None] = mapped_column(String(43))
+    certificate_not_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    installation_revision: Mapped[int | None] = mapped_column(Integer)
+    renewal_status: Mapped[str | None] = mapped_column(String(24))
+    renewal_request_id: Mapped[str | None] = mapped_column(String(36))
+    renewal_issuance_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    renewal_ack_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class EdgePairing(Base):
+    __tablename__ = "edge_pairing"
+    __table_args__ = (CheckConstraint("id = 1", name="ck_edge_pairing_singleton"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    central_session_revision: Mapped[int | None] = mapped_column(Integer)
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(40), nullable=False)
+    registration_request_id: Mapped[str] = mapped_column(String(36), nullable=False, unique=True)
+    session_id: Mapped[str | None] = mapped_column(String(36))
+    token_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    candidate_spki_sha256: Mapped[str] = mapped_column(String(43), nullable=False)
+    csr_sha256: Mapped[str] = mapped_column(String(43), nullable=False)
+    tenant_id: Mapped[str | None] = mapped_column(String(36))
+    site_id: Mapped[str | None] = mapped_column(String(120))
+    claim_revision: Mapped[int | None] = mapped_column(Integer)
+    installation_revision: Mapped[int | None] = mapped_column(Integer)
+    credential_id: Mapped[str | None] = mapped_column(String(36))
+    certificate_sha256: Mapped[str | None] = mapped_column(String(43))
+    registration_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    code_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    claim_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    issuance_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ack_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(String(80))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now)
+
+
+class ConfigurationSnapshot(Base):
+    __tablename__ = "configuration_snapshots"
+    __table_args__ = (
+        UniqueConstraint("installation_id", "config_version", name="uq_config_snapshot_version"),
+        Index(
+            "uq_configuration_snapshot_pending",
+            "installation_id",
+            unique=True,
+            sqlite_where=text("status = 'pending'"),
+            postgresql_where=text("status = 'pending'"),
+        ),
+        CheckConstraint("status IN ('pending', 'acked')", name="ck_configuration_snapshot_status"),
+    )
+    snapshot_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    installation_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    config_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    projection_sha256: Mapped[str] = mapped_column(String(43), nullable=False)
+    request_sha256: Mapped[str] = mapped_column(String(43), nullable=False)
+    payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=now
+    )
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    needs_status_check: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    acked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Audit(Base):

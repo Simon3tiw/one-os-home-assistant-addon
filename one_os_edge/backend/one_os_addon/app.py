@@ -12,13 +12,14 @@ from datetime import UTC
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlparse
+from uuid import uuid4
 
 from alembic import command
 from alembic.config import Config
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import create_engine, event, func, insert, select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import sessionmaker
@@ -29,12 +30,15 @@ from .central_destination import (
     test_pinned_discovery,
     validate_https_origin,
 )
+from .central_pairing_client import CentralPairingHTTPClient, PairingRequestGate
+from .configuration_snapshot import ConfigurationSnapshotRepository, ConfigurationSnapshotSync
 from .ha.client import HomeAssistantReadOnlyClient
 from .ha.fake import IncompatibleHomeAssistant, UnavailableHomeAssistant
 from .models import (
     Asset,
     Audit,
     CentralDestination,
+    EdgeIdentity,
     PhysicalDevice,
     Point,
     Property,
@@ -46,6 +50,10 @@ from .models import (
     now,
     uid,
 )
+from .pairing_backend import PairingBackend, PairingError
+from .pairing_repository import PairingRepository
+from .pairing_storage import IdentityStore
+from .pairing_worker import PairingWorker
 from .reconciliation import infer_ontology_class, reconcile
 from .sync import SyncCoordinator
 
@@ -109,6 +117,15 @@ class PointPlacementBody(BaseModel):
 
 class RevisionBody(BaseModel):
     revision: int
+
+
+class EmptyPairingBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class ConfirmedPairingBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    confirmed: Literal[True]
 
 
 class CentralDestinationBody(BaseModel):
@@ -188,6 +205,7 @@ def migrate_database(database_url: str) -> None:
         raise RuntimeError("alembic configuration unavailable")
     config = Config(str(config_path))
     config.set_main_option("sqlalchemy.url", database_url)
+    config.attributes["explicit_database_url"] = True
     command.upgrade(config, "head")
 
 
@@ -462,6 +480,9 @@ def create_app(
     start_background_sync=False,
     sync_interval=300,
     destination_tester=None,
+    identity_dir=None,
+    pairing_backend=None,
+    start_pairing_worker=True,
 ):
     app = FastAPI(
         title="ONE.OS commissioning API", version="1.0.0", root_path=os.getenv("INGRESS_PATH", "")
@@ -483,6 +504,17 @@ def create_app(
             cur.close()
 
     app.state.session = sessionmaker(engine, expire_on_commit=False)
+    app.state.identity_dir = Path(identity_dir or os.getenv("IDENTITY_DIR", "/data/identity"))
+    app.state.pairing = None
+    app.state.pairing_worker = None
+    app.state.configuration_snapshot_repository = ConfigurationSnapshotRepository(app.state.session)
+    app.state.configuration_sync = None
+    with app.state.session() as identity_session:
+        if identity_session.get(EdgeIdentity, 1) is None:
+            identity_session.add(
+                EdgeIdentity(id=1, installation_id=str(uuid4()), status="unpaired", revision=0)
+            )
+            identity_session.commit()
     supervisor_token = os.getenv("SUPERVISOR_TOKEN")
     app.state.ha = ha_client or (
         HomeAssistantReadOnlyClient(supervisor_token)
@@ -504,8 +536,45 @@ def create_app(
     app.state.sync = None
     app.state.destination_tester = destination_tester or test_pinned_discovery
 
+    if pairing_backend is not False:
+        if pairing_backend is None:
+
+            def pairing_destination() -> tuple[str, str]:
+                with app.state.session() as destination_session:
+                    destination = destination_session.get(CentralDestination, 1)
+                    if destination is None:
+                        raise LookupError("central destination is not configured")
+                    return destination.origin, destination.certificate_fingerprint
+
+            central_pairing = CentralPairingHTTPClient(
+                pairing_destination,
+                gate=PairingRequestGate(interval=1.0, slots=2),
+            )
+            identity_store = IdentityStore(app.state.identity_dir)
+            pairing_repository = PairingRepository(app.state.session)
+            app.state.pairing = PairingBackend(
+                identity_store,
+                central_pairing,
+                repository=pairing_repository,
+            )
+            app.state.configuration_sync = ConfigurationSnapshotSync(
+                app.state.configuration_snapshot_repository,
+                pairing_repository.load,
+                identity_store,
+                central_pairing,
+            )
+            if start_pairing_worker:
+                app.state.pairing_worker = PairingWorker(
+                    app.state.pairing,
+                    configuration_sync=app.state.configuration_sync,
+                )
+        else:
+            app.state.pairing = pairing_backend
+
     @asynccontextmanager
     async def lifespan(_app):
+        if app.state.pairing_worker:
+            await app.state.pairing_worker.start()
         if start_background_sync:
             app.state.sync = SyncCoordinator(
                 app.state.ha,
@@ -516,6 +585,8 @@ def create_app(
         try:
             yield
         finally:
+            if app.state.pairing_worker:
+                await app.state.pairing_worker.stop()
             if app.state.sync:
                 await app.state.sync.stop()
             engine.dispose()
@@ -599,9 +670,105 @@ def create_app(
                 "connectorPresence": app.state.ha.connector_presence,
                 "lastSync": last.at.isoformat() if last else None,
                 "counts": data["counts"],
-                "phaseNotice": "Cloud pairing and data transport follow in Phase 2B/2C",
+                "phaseNotice": (
+                    "Secure pairing and configuration sync are active; "
+                    "telemetry follows in Phase 2C"
+                ),
                 "database": "healthy",
             }
+
+    def pairing_or_unavailable():
+        if app.state.pairing is None:
+            raise HTTPException(503, detail={"code": "pairing_unavailable"})
+        return app.state.pairing
+
+    def no_store(response: Response) -> None:
+        response.headers["Cache-Control"] = "no-store"
+
+    def pairing_failure(error: PairingError) -> HTTPException:
+        code = str(error)
+        unavailable = {
+            "central_registration_unreachable",
+            "central_proof_unreachable",
+            "central_result_unreachable",
+            "central_claim_proof_unreachable",
+            "central_ack_unreachable",
+        }
+        return HTTPException(503 if code in unavailable else 409, detail={"code": code})
+
+    @app.get("/api/v1/pairing/status")
+    def pairing_status(response: Response):
+        no_store(response)
+        return pairing_or_unavailable().status()
+
+    @app.get("/api/v1/pairing/code")
+    def pairing_code(response: Response):
+        no_store(response)
+        try:
+            return pairing_or_unavailable().code()
+        except PairingError as error:
+            raise pairing_failure(error) from None
+
+    @app.post("/api/v1/pairing/start")
+    def pairing_start(_body: EmptyPairingBody, response: Response, request: Request):
+        no_store(response)
+        pairing = pairing_or_unavailable()
+        installation_id = pairing.status().get("installationId")
+        if not installation_id:
+            with db() as pairing_db:
+                installation_id = pairing_db.get(EdgeIdentity, 1).installation_id
+        try:
+            return pairing.start("initial", installation_id, actor_id=f"ha:{request.state.user_id}")
+        except PairingError as error:
+            raise pairing_failure(error) from None
+
+    @app.post("/api/v1/pairing/refresh")
+    def pairing_refresh(_body: EmptyPairingBody, response: Response, request: Request):
+        no_store(response)
+        try:
+            return pairing_or_unavailable().refresh(actor_id=f"ha:{request.state.user_id}")
+        except PairingError as error:
+            raise pairing_failure(error) from None
+
+    @app.post("/api/v1/pairing/reset")
+    def pairing_reset(_body: EmptyPairingBody, response: Response, request: Request):
+        no_store(response)
+        pairing = pairing_or_unavailable()
+        try:
+            pairing.reset(actor_id=f"ha:{request.state.user_id}")
+            return pairing.status()
+        except PairingError as error:
+            raise pairing_failure(error) from None
+
+    @app.post("/api/v1/pairing/cancel")
+    def pairing_cancel(_body: ConfirmedPairingBody, response: Response, request: Request):
+        no_store(response)
+        try:
+            return pairing_or_unavailable().cancel(actor_id=f"ha:{request.state.user_id}")
+        except PairingError as error:
+            raise pairing_failure(error) from None
+
+    @app.post("/api/v1/pairing/rotate-key")
+    def pairing_rotate_key(_body: ConfirmedPairingBody, response: Response, request: Request):
+        no_store(response)
+        try:
+            return pairing_or_unavailable().rotate_key(actor_id=f"ha:{request.state.user_id}")
+        except PairingError as error:
+            raise pairing_failure(error) from None
+
+    @app.post("/api/v1/pairing/replace-identity-after-restore")
+    def pairing_replace_after_restore(
+        _body: ConfirmedPairingBody, response: Response, request: Request
+    ):
+        no_store(response)
+        pairing = pairing_or_unavailable()
+        public = pairing.status()
+        if public.get("status") != "identity_missing_after_restore":
+            raise HTTPException(409, detail={"code": "restore_replacement_not_required"})
+        try:
+            return pairing.rotate_key(actor_id=f"ha:{request.state.user_id}")
+        except PairingError as error:
+            raise pairing_failure(error) from None
 
     @app.get("/api/v1/central-destination")
     def get_central_destination():
@@ -1284,7 +1451,7 @@ def create_app(
                 "installationHash": hashlib.sha256(
                     (site.installation_id if site else "uninitialized").encode()
                 ).hexdigest(),
-                "databaseRevision": "0004",
+                "databaseRevision": "0009",
                 "connectorPresence": app.state.ha.connector_presence,
                 "lastSync": {
                     "at": last.at.isoformat() if last else None,

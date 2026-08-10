@@ -1,0 +1,599 @@
+{
+  "schemaVersion": "1.0",
+  "baseDocument": {
+    "schemaVersion": "1.0",
+    "snapshotId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    "installationId": "00000000-0000-4000-8000-000000000002",
+    "configVersion": 1,
+    "capturedAt": "2030-01-01T12:00:00Z",
+    "projectionSha256": "ofWKgQf4QOH_MfWwAK4uaXZBasZpiKfuIDOA0ZbUE2I",
+    "structures": [
+      {
+        "id": "structure-1",
+        "name": "Hoofdgebouw",
+        "ontologyClass": "Building"
+      }
+    ],
+    "spaces": [
+      {
+        "id": "space-1",
+        "structureId": "structure-1",
+        "name": "Technische ruimte",
+        "ontologyClass": "MechanicalRoom"
+      }
+    ],
+    "assets": [
+      {
+        "id": "asset-1",
+        "spaceId": "space-1",
+        "name": "Warmtepomp",
+        "ontologyClass": "HeatPump"
+      }
+    ],
+    "points": [
+      {
+        "id": "point-1",
+        "assetId": "asset-1",
+        "name": "Aanvoertemperatuur",
+        "ontologyClass": "SupplyTemperature",
+        "valueType": "number",
+        "canonicalUnit": "Cel",
+        "displayUnit": "degC",
+        "decimals": 1
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "base-valid",
+      "valid": true,
+      "code": "valid",
+      "operations": []
+    },
+    {
+      "name": "fractional-utc-valid",
+      "valid": true,
+      "code": "valid",
+      "operations": [
+        {
+          "path": "capturedAt",
+          "value": "2030-01-01T12:00:00.123456Z"
+        }
+      ]
+    },
+    {
+      "name": "number-unit-Cel-degC",
+      "valid": true,
+      "code": "valid",
+      "operations": [
+        {
+          "path": "points.0.canonicalUnit",
+          "value": "Cel"
+        },
+        {
+          "path": "points.0.displayUnit",
+          "value": "degC"
+        }
+      ]
+    },
+    {
+      "name": "number-unit-Cel-degF",
+      "valid": true,
+      "code": "valid",
+      "operations": [
+        {
+          "path": "points.0.canonicalUnit",
+          "value": "Cel"
+        },
+        {
+          "path": "points.0.displayUnit",
+          "value": "degF"
+        }
+      ]
+    },
+    {
+      "name": "number-unit-%-%",
+      "valid": true,
+      "code": "valid",
+      "operations": [
+        {
+          "path": "points.0.canonicalUnit",
+          "value": "%"
+        },
+        {
+          "path": "points.0.displayUnit",
+          "value": "%"
+        }
+      ]
+    },
+    {
+      "name": "number-unit-W-W",
+      "valid": true,
+      "code": "valid",
+      "operations": [
+        {
+          "path": "points.0.canonicalUnit",
+          "value": "W"
+        },
+        {
+          "path": "points.0.displayUnit",
+          "value": "W"
+        }
+      ]
+    },
+    {
+      "name": "number-unit-kW-kW",
+      "valid": true,
+      "code": "valid",
+      "operations": [
+        {
+          "path": "points.0.canonicalUnit",
+          "value": "kW"
+        },
+        {
+          "path": "points.0.displayUnit",
+          "value": "kW"
+        }
+      ]
+    },
+    {
+      "name": "number-unit-W.h-Wh",
+      "valid": true,
+      "code": "valid",
+      "operations": [
+        {
+          "path": "points.0.canonicalUnit",
+          "value": "W.h"
+        },
+        {
+          "path": "points.0.displayUnit",
+          "value": "Wh"
+        }
+      ]
+    },
+    {
+      "name": "number-unit-kW.h-kWh",
+      "valid": true,
+      "code": "valid",
+      "operations": [
+        {
+          "path": "points.0.canonicalUnit",
+          "value": "kW.h"
+        },
+        {
+          "path": "points.0.displayUnit",
+          "value": "kWh"
+        }
+      ]
+    },
+    {
+      "name": "number-unit-V-V",
+      "valid": true,
+      "code": "valid",
+      "operations": [
+        {
+          "path": "points.0.canonicalUnit",
+          "value": "V"
+        },
+        {
+          "path": "points.0.displayUnit",
+          "value": "V"
+        }
+      ]
+    },
+    {
+      "name": "number-unit-A-A",
+      "valid": true,
+      "code": "valid",
+      "operations": [
+        {
+          "path": "points.0.canonicalUnit",
+          "value": "A"
+        },
+        {
+          "path": "points.0.displayUnit",
+          "value": "A"
+        }
+      ]
+    },
+    {
+      "name": "number-unit-Hz-Hz",
+      "valid": true,
+      "code": "valid",
+      "operations": [
+        {
+          "path": "points.0.canonicalUnit",
+          "value": "Hz"
+        },
+        {
+          "path": "points.0.displayUnit",
+          "value": "Hz"
+        }
+      ]
+    },
+    {
+      "name": "number-unit-Pa-Pa",
+      "valid": true,
+      "code": "valid",
+      "operations": [
+        {
+          "path": "points.0.canonicalUnit",
+          "value": "Pa"
+        },
+        {
+          "path": "points.0.displayUnit",
+          "value": "Pa"
+        }
+      ]
+    },
+    {
+      "name": "number-unit-hPa-hPa",
+      "valid": true,
+      "code": "valid",
+      "operations": [
+        {
+          "path": "points.0.canonicalUnit",
+          "value": "hPa"
+        },
+        {
+          "path": "points.0.displayUnit",
+          "value": "hPa"
+        }
+      ]
+    },
+    {
+      "name": "number-unit-[ppm]-ppm",
+      "valid": true,
+      "code": "valid",
+      "operations": [
+        {
+          "path": "points.0.canonicalUnit",
+          "value": "[ppm]"
+        },
+        {
+          "path": "points.0.displayUnit",
+          "value": "ppm"
+        }
+      ]
+    },
+    {
+      "name": "number-unit-lx-lx",
+      "valid": true,
+      "code": "valid",
+      "operations": [
+        {
+          "path": "points.0.canonicalUnit",
+          "value": "lx"
+        },
+        {
+          "path": "points.0.displayUnit",
+          "value": "lx"
+        }
+      ]
+    },
+    {
+      "name": "number-unitless-null-decimals",
+      "valid": true,
+      "code": "valid",
+      "operations": [
+        {
+          "path": "points.0.canonicalUnit",
+          "value": null
+        },
+        {
+          "path": "points.0.displayUnit",
+          "value": null
+        },
+        {
+          "path": "points.0.decimals",
+          "value": null
+        }
+      ]
+    },
+    {
+      "name": "number-unitless-with-decimals",
+      "valid": true,
+      "code": "valid",
+      "operations": [
+        {
+          "path": "points.0.canonicalUnit",
+          "value": null
+        },
+        {
+          "path": "points.0.displayUnit",
+          "value": null
+        },
+        {
+          "path": "points.0.decimals",
+          "value": 3
+        }
+      ]
+    },
+    {
+      "name": "boolean-all-metadata-null",
+      "valid": true,
+      "code": "valid",
+      "operations": [
+        {
+          "path": "points.0.valueType",
+          "value": "boolean"
+        },
+        {
+          "path": "points.0.canonicalUnit",
+          "value": null
+        },
+        {
+          "path": "points.0.displayUnit",
+          "value": null
+        },
+        {
+          "path": "points.0.decimals",
+          "value": null
+        }
+      ]
+    },
+    {
+      "name": "string-all-metadata-null",
+      "valid": true,
+      "code": "valid",
+      "operations": [
+        {
+          "path": "points.0.valueType",
+          "value": "string"
+        },
+        {
+          "path": "points.0.canonicalUnit",
+          "value": null
+        },
+        {
+          "path": "points.0.displayUnit",
+          "value": null
+        },
+        {
+          "path": "points.0.decimals",
+          "value": null
+        }
+      ]
+    },
+    {
+      "name": "enum-all-metadata-null",
+      "valid": true,
+      "code": "valid",
+      "operations": [
+        {
+          "path": "points.0.valueType",
+          "value": "enum"
+        },
+        {
+          "path": "points.0.canonicalUnit",
+          "value": null
+        },
+        {
+          "path": "points.0.displayUnit",
+          "value": null
+        },
+        {
+          "path": "points.0.decimals",
+          "value": null
+        }
+      ]
+    },
+    {
+      "name": "unsorted-structure-ids",
+      "valid": false,
+      "code": "ordering_or_duplicate_id",
+      "operations": [
+        {
+          "path": "structures",
+          "value": [
+            {
+              "id": "structure-z",
+              "name": "Z",
+              "ontologyClass": "Building"
+            },
+            {
+              "id": "structure-a",
+              "name": "A",
+              "ontologyClass": "Building"
+            }
+          ]
+        },
+        {
+          "path": "spaces.0.structureId",
+          "value": "structure-a"
+        }
+      ]
+    },
+    {
+      "name": "duplicate-point-id",
+      "valid": false,
+      "code": "ordering_or_duplicate_id",
+      "operations": [
+        {
+          "path": "points",
+          "value": [
+            {
+              "id": "point-1",
+              "assetId": "asset-1",
+              "name": "Aanvoertemperatuur",
+              "ontologyClass": "SupplyTemperature",
+              "valueType": "number",
+              "canonicalUnit": "Cel",
+              "displayUnit": "degC",
+              "decimals": 1
+            },
+            {
+              "id": "point-1",
+              "assetId": "asset-1",
+              "name": "Aanvoertemperatuur",
+              "ontologyClass": "SupplyTemperature",
+              "valueType": "number",
+              "canonicalUnit": "Cel",
+              "displayUnit": "degC",
+              "decimals": 1
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "cross-kind-id-collision",
+      "valid": false,
+      "code": "cross_kind_duplicate_id",
+      "operations": [
+        {
+          "path": "points.0.id",
+          "value": "asset-1"
+        }
+      ]
+    },
+    {
+      "name": "unknown-structure-reference",
+      "valid": false,
+      "code": "unknown_structure_reference",
+      "operations": [
+        {
+          "path": "spaces.0.structureId",
+          "value": "structure-missing"
+        }
+      ]
+    },
+    {
+      "name": "unknown-space-reference",
+      "valid": false,
+      "code": "unknown_space_reference",
+      "operations": [
+        {
+          "path": "assets.0.spaceId",
+          "value": "space-missing"
+        }
+      ]
+    },
+    {
+      "name": "unknown-asset-reference",
+      "valid": false,
+      "code": "unknown_asset_reference",
+      "operations": [
+        {
+          "path": "points.0.assetId",
+          "value": "asset-missing"
+        }
+      ]
+    },
+    {
+      "name": "numeric-partial-unit",
+      "valid": false,
+      "code": "point_metadata_matrix",
+      "operations": [
+        {
+          "path": "points.0.displayUnit",
+          "value": null
+        }
+      ]
+    },
+    {
+      "name": "numeric-incompatible-unit",
+      "valid": false,
+      "code": "point_metadata_matrix",
+      "operations": [
+        {
+          "path": "points.0.displayUnit",
+          "value": "kW"
+        }
+      ]
+    },
+    {
+      "name": "numeric-unversioned-unit",
+      "valid": false,
+      "code": "point_metadata_matrix",
+      "operations": [
+        {
+          "path": "points.0.canonicalUnit",
+          "value": "m/s"
+        },
+        {
+          "path": "points.0.displayUnit",
+          "value": "m/s"
+        }
+      ]
+    },
+    {
+      "name": "non-numeric-unit",
+      "valid": false,
+      "code": "point_metadata_matrix",
+      "operations": [
+        {
+          "path": "points.0.valueType",
+          "value": "boolean"
+        },
+        {
+          "path": "points.0.decimals",
+          "value": null
+        }
+      ]
+    },
+    {
+      "name": "non-numeric-decimals",
+      "valid": false,
+      "code": "point_metadata_matrix",
+      "operations": [
+        {
+          "path": "points.0.valueType",
+          "value": "string"
+        },
+        {
+          "path": "points.0.canonicalUnit",
+          "value": null
+        },
+        {
+          "path": "points.0.displayUnit",
+          "value": null
+        }
+      ]
+    },
+    {
+      "name": "utc-offset",
+      "valid": false,
+      "code": "strict_utc",
+      "operations": [
+        {
+          "path": "capturedAt",
+          "value": "2030-01-01T13:00:00+01:00"
+        }
+      ]
+    },
+    {
+      "name": "utc-lower-z",
+      "valid": false,
+      "code": "strict_utc",
+      "operations": [
+        {
+          "path": "capturedAt",
+          "value": "2030-01-01T12:00:00z"
+        }
+      ]
+    },
+    {
+      "name": "utc-space",
+      "valid": false,
+      "code": "strict_utc",
+      "operations": [
+        {
+          "path": "capturedAt",
+          "value": "2030-01-01 12:00:00Z"
+        }
+      ]
+    },
+    {
+      "name": "utc-invalid-day",
+      "valid": false,
+      "code": "strict_utc",
+      "operations": [
+        {
+          "path": "capturedAt",
+          "value": "2030-02-30T12:00:00Z"
+        }
+      ]
+    }
+  ]
+}

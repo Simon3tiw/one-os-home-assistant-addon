@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import http.client
+import ipaddress
 import json
 import socket
 import ssl
@@ -56,8 +57,30 @@ def validate_https_origin(value: str) -> str:
         or parsed.fragment
         or not parsed.netloc
         or (port is not None and not 1 <= port <= 65535)
-        or value != f"https://{parsed.netloc}"
     ):
+        raise ValueError("invalid_central_origin")
+    host = parsed.hostname
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        if not host.isascii() or host.endswith(".") or all(c in "0123456789." for c in host):
+            raise ValueError("invalid_central_origin") from None
+        try:
+            canonical_host = host.encode("idna").decode("ascii").lower()
+        except UnicodeError as error:
+            raise ValueError("invalid_central_origin") from error
+        if (
+            not canonical_host
+            or len(canonical_host) > 253
+            or any(not label or len(label) > 63 for label in canonical_host.split("."))
+        ):
+            raise ValueError("invalid_central_origin") from None
+    else:
+        canonical_host = address.compressed
+        if address.version == 6:
+            canonical_host = f"[{canonical_host}]"
+    canonical = f"https://{canonical_host}" + (f":{port}" if port is not None else "")
+    if value != canonical:
         raise ValueError("invalid_central_origin")
     return value
 
@@ -252,12 +275,18 @@ def _test_pinned_discovery_in_worker(
         document = json.loads(payload)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise DiscoveryError("protocol_error") from error
+    valid_capability_tuples = {
+        (False, "2B.1-sandbox-foundation"),
+        (True, "2B.2-secure-pairing"),
+        (True, "2B.3-selected-configuration-sync"),
+    }
     if (
         not isinstance(document, dict)
+        or set(document) != {"service", "schemaVersion", "pairingSupported", "phase"}
         or document.get("service") != "one-os-central"
         or document.get("schemaVersion") != "1.0"
-        or document.get("pairingSupported") is not False
-        or document.get("phase") != "2B.1-sandbox-foundation"
+        or not isinstance(document.get("pairingSupported"), bool)
+        or (document.get("pairingSupported"), document.get("phase")) not in valid_capability_tuples
     ):
         raise DiscoveryError("protocol_error")
     return {

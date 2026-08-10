@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import http.client
+import json
 import socket
 import ssl
 import subprocess
@@ -126,6 +127,42 @@ def test_put_rejects_anything_except_exact_https_origin(client, auth, origin):
     assert response.status_code == 422
 
 
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "https://EXAMPLE.com",
+        "https://example.com.",
+        "https://127.1",
+        "https://2130706433",
+        "https://0177.0.0.1",
+        "https://[0:0:0:0:0:0:0:1]",
+        "https://bücher.example",
+    ],
+)
+def test_put_rejects_noncanonical_host_aliases(client, auth, origin):
+    response = client.put(
+        "/api/v1/central-destination",
+        headers=auth,
+        json={"revision": 0, "origin": origin, "certificateFingerprint": "ab" * 32},
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "origin",
+    ["https://example.com", "https://xn--bcher-kva.example:8443", "https://[::1]:443"],
+)
+def test_put_accepts_only_byte_exact_canonical_hosts(client, auth, origin):
+    response = client.put(
+        "/api/v1/central-destination",
+        headers=auth,
+        json={"revision": 0, "origin": origin, "certificateFingerprint": "ab" * 32},
+    )
+
+    assert response.status_code == 200
+
+
 @pytest.mark.parametrize("fingerprint", ["ab" * 31, "gg" * 32, "ab:cd", " ab" * 32])
 def test_put_rejects_malformed_sha256_fingerprint(client, auth, fingerprint):
     response = client.put(
@@ -157,14 +194,15 @@ def test_destination_mutations_keep_ingress_csrf_guards(client):
 
 def test_connection_endpoint_uses_only_persisted_destination(client, auth):
     calls = []
-    client.app.state.destination_tester = lambda origin, fingerprint: calls.append(
-        (origin, fingerprint)
-    ) or {
-        "service": "one-os-central",
-        "schemaVersion": "1.0",
-        "pairingSupported": False,
-        "phase": "2B.1-sandbox-foundation",
-    }
+    client.app.state.destination_tester = lambda origin, fingerprint: (
+        calls.append((origin, fingerprint))
+        or {
+            "service": "one-os-central",
+            "schemaVersion": "1.0",
+            "pairingSupported": False,
+            "phase": "2B.1-sandbox-foundation",
+        }
+    )
     client.put(
         "/api/v1/central-destination",
         headers=auth,
@@ -315,6 +353,105 @@ def test_real_pinned_discovery_verifies_self_signed_cert_and_fixed_path(tls_disc
         "phase": "2B.1-sandbox-foundation",
     }
     assert _DiscoveryHandler.seen_paths == ["/api/v1/edge/discovery"]
+
+
+@pytest.mark.parametrize(
+    ("pairing_supported", "phase"),
+    [
+        (False, "2B.1-sandbox-foundation"),
+        (True, "2B.2-secure-pairing"),
+        (True, "2B.3-selected-configuration-sync"),
+    ],
+)
+def test_real_pinned_discovery_accepts_only_known_consistent_capability_tuples(
+    tls_discovery_server, pairing_supported, phase
+):
+    origin, fingerprint = tls_discovery_server
+    _DiscoveryHandler.response_body = json.dumps(
+        {
+            "schemaVersion": "1.0",
+            "service": "one-os-central",
+            "pairingSupported": pairing_supported,
+            "phase": phase,
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    result = test_pinned_discovery(origin, fingerprint, timeout=2)
+
+    assert result["pairingSupported"] is pairing_supported
+    assert result["phase"] == phase
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {
+            "schemaVersion": "1.0",
+            "service": "one-os-central",
+            "pairingSupported": False,
+            "phase": "2B.2-secure-pairing",
+        },
+        {
+            "schemaVersion": "1.0",
+            "service": "one-os-central",
+            "pairingSupported": True,
+            "phase": "2B.1-sandbox-foundation",
+        },
+        {
+            "schemaVersion": "1.0",
+            "service": "one-os-central",
+            "pairingSupported": True,
+            "phase": "future-phase",
+        },
+        {
+            "schemaVersion": "1.0",
+            "service": "one-os-central",
+            "pairingSupported": 1,
+            "phase": "2B.2-secure-pairing",
+        },
+        {
+            "schemaVersion": "1.0",
+            "service": "one-os-central",
+            "pairingSupported": True,
+            "phase": "2B.2-secure-pairing",
+            "unknown": True,
+        },
+    ],
+)
+def test_real_pinned_discovery_rejects_unknown_or_contradictory_capabilities(
+    tls_discovery_server, document
+):
+    origin, fingerprint = tls_discovery_server
+    _DiscoveryHandler.response_body = json.dumps(document, separators=(",", ":")).encode("utf-8")
+
+    with pytest.raises(DiscoveryError, match="protocol_error"):
+        test_pinned_discovery(origin, fingerprint, timeout=2)
+
+
+def test_later_pairing_ready_result_keeps_destination_revision_cas_and_has_no_secret(client, auth):
+    configured = client.put(
+        "/api/v1/central-destination",
+        headers=auth,
+        json={"revision": 0, "origin": ORIGIN, "certificateFingerprint": "ab" * 32},
+    )
+    client.app.state.destination_tester = lambda _origin, _fingerprint: {
+        "service": "one-os-central",
+        "schemaVersion": "1.0",
+        "pairingSupported": True,
+        "phase": "2B.3-selected-configuration-sync",
+    }
+
+    tested = client.post("/api/v1/central-destination/test", headers=auth, json={})
+
+    assert configured.json()["revision"] == 1
+    assert tested.status_code == 200
+    assert tested.json()["revision"] == 1
+    assert tested.json()["pairingSupported"] is True
+    assert tested.json()["phase"] == "2B.3-selected-configuration-sync"
+    persisted = client.get("/api/v1/central-destination", headers=auth).json()
+    assert persisted["revision"] == 1
+    assert not any("secret" in key.lower() for key in persisted)
 
 
 def test_real_pinned_discovery_rejects_wrong_pin_before_http_data(tls_discovery_server):
