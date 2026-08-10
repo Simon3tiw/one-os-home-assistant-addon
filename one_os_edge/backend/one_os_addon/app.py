@@ -56,6 +56,7 @@ from .pairing_storage import IdentityStore
 from .pairing_worker import PairingWorker
 from .reconciliation import infer_ontology_class, reconcile
 from .sync import SyncCoordinator
+from .version import RELEASE_VERSION
 
 
 class OverrideBody(BaseModel):
@@ -1446,7 +1447,7 @@ def create_app(
             last = s.scalar(select(SyncRun).order_by(SyncRun.at.desc()))
             return {
                 "schemaVersion": "1.0",
-                "softwareVersion": "0.2.2",
+                "softwareVersion": RELEASE_VERSION,
                 "architecture": platform.machine(),
                 "installationHash": hashlib.sha256(
                     (site.installation_id if site else "uninitialized").encode()

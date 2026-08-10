@@ -1,6 +1,6 @@
 [project]
 name = "one-os-ha-addon"
-version = "0.2.2"
+version = "0.3.0"
 requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.116.1",

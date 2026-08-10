@@ -1,5 +1,5 @@
 name: ONE.OS Edge Connector
-version: "0.2.2"
+version: "0.3.0"
 slug: one_os_edge
 description: Secure ONE.OS pairing and selected Home Assistant configuration sync
 url: https://github.com/Simon3tiw/one-os-home-assistant-addon
@@ -8,7 +8,7 @@ arch:
   - aarch64
 init: false
 ingress: true
-panel_admin: true
+
 panel_icon: mdi:office-building-cog
 panel_title: ONE.OS Commissioning
 homeassistant: "2025.1.0"
