@@ -49,7 +49,7 @@ Iedere sample en quality event bindt aan:
 - canonical lowercase UUIDv4 `streamEpochId`;
 - signed-int64 `sequence`, start exact op 0 en strikt oplopend per `(installationId, pointId, streamEpochId)`.
 
-`installationRevision` staat bewust niet in telemetry: credentialrenewal mag geldige backlog niet ongeldig maken. Central autoriseert transport via de gepresenteerde actieve mTLS-credential en valideert ieder record tegen de immutable historische snapshotbinding. Revoke stopt ieder nieuw transport. Repair/re-pair vormt een aparte authorizationgrens; toelating van historische backlog wordt in 2C.3 expliciet aan credentialhistory gebonden.
+`installationRevision` staat bewust niet in telemetry: credentialrenewal mag geldige backlog niet ongeldig maken. Central autoriseert transport via de gepresenteerde actieve mTLS-credential en autoriseert het immutable batch-`credentialId` transactioneel binnen exact dezelfde telemetrylineage. Daardoor mag normale renewal een oude batch met de actuele transportcredential aanbieden zonder de batchbytes te wijzigen. Revoke stopt ieder nieuw transport. Repair/re-pair vormt een nieuwe lineage en authorization floor; oude backlog wordt terminal geweigerd zonder de nieuwe transportcredential als revoked te classificeren.
 
 Een nieuwe `streamEpochId` is alleen toegestaan wanneer sequencecontinuïteit niet meer bewijsbaar is, niet alleen na een OS-reboot. Runtimebeleid limiteert nieuwe epochs tot 64 per Point per rollende 24 uur op Central-servertijd.
 
@@ -89,7 +89,7 @@ De JSON Schema-artifacts beschrijven de gesloten structuur ná de lexicale wireg
 
 ## 6. Batch
 
-Een batch bindt aan precies één `installationId` en de via mTLS gepresenteerde `credentialId`. Hij bevat drie deterministisch gesorteerde arrays: `samples`, `qualityEvents`, `gaps`.
+Een batch bindt aan precies één `installationId` en het immutable credential waarmee hij lokaal is gevormd. Dit batch-`credentialId` is normaal gelijk aan de via mTLS gepresenteerde credential, maar mag na normale renewal verschillen wanneer beide credentials exact dezelfde telemetrylineage hebben. Hij bevat drie deterministisch gesorteerde arrays: `samples`, `qualityEvents`, `gaps`.
 
 Sortering:
 
@@ -117,7 +117,7 @@ Central publiceert pas na durable commit een canonical ACK met:
 
 - `schemaVersion` exact `1.0`;
 - `installationId`;
-- `credentialId` van de request-mTLS-identiteit;
+- `credentialId` uit de immutable requestbody;
 - `batchId`;
 - `requestSha256` over exact ontvangen canonical requestbytes;
 - `acceptedSamples`, `duplicateSamples`;
@@ -127,6 +127,8 @@ Central publiceert pas na durable commit een canonical ACK met:
 - `acceptedAt` op Central-servertijd.
 
 Per recordsoort moet `accepted + duplicate == requestcount`. Gedeeltelijke acceptatie is verboden. Dezelfde `batchId` plus requesthash retourneert bytegelijk dezelfde ACK; dezelfde `batchId` met andere bytes is conflict. Edge verwijdert uitsluitend de lokaal gepersisteerde records uit exact die bytegelijke batch na volledige ACKbinding en cursorregressiecontrole.
+
+HTTP `401` is uitsluitend gereserveerd voor afwijzing van de daadwerkelijk gepresenteerde mTLS-transportcredential. Installatie-, bodycredential-, lineage- en authorization-floorconflicten na geslaagde mTLS zijn exact bekende terminale `409`-responses en mogen de actuele transportcredential nooit lokaal revoken. Een `422` voor een timestamp ouder dan het definitieve verledenvenster is terminal `expired_payload`; een timestamp die nog te ver in de toekomst ligt kan later geldig worden en blijft daarom retrybaar. Alleen exact canonical, begrensde allowlistresponses mogen terminal worden geclassificeerd; iedere onbekende of malformed foutresponse blijft fail-closed retrybaar.
 
 ## 8. Harde limieten
 

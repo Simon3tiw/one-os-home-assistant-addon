@@ -147,12 +147,12 @@ class TelemetryDeliveryWorker:
         except TelemetryTransportError as error:
             code = str(error)
             self.last_error = code
-            if code == "immutable_conflict":
+            if code in {"immutable_conflict", "expired_payload"}:
                 try:
                     self.journal.quarantine(
                         batch_id=batch.batch_id,
                         owner=self.owner,
-                        reason="immutable_conflict",
+                        reason=code,
                     )
                 except TelemetryDeliveryError as quarantine_error:
                     self.last_error = f"quarantine_{quarantine_error}"

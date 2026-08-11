@@ -18,6 +18,7 @@ _MAX_INPUT_CHARS = 4096
 _MAX_MATERIAL_BYTES = 64 * 1024
 _SAFE_ERRORS = frozenset(
     {
+        "expired_payload",
         "immutable_conflict",
         "protocol_error",
         "rate_limited",

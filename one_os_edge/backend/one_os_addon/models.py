@@ -427,9 +427,9 @@ class TelemetryBatch(Base):
             name="ck_telemetry_batch_ingest_cursor",
         ),
         CheckConstraint(
-            "(status = 'quarantined' AND terminal_reason = 'immutable_conflict' AND "
-            "quarantined_at IS NOT NULL) OR (status != 'quarantined' AND "
-            "terminal_reason IS NULL AND quarantined_at IS NULL)",
+            "(status = 'quarantined' AND terminal_reason IN "
+            "('immutable_conflict', 'expired_payload') AND quarantined_at IS NOT NULL) OR "
+            "(status != 'quarantined' AND terminal_reason IS NULL AND quarantined_at IS NULL)",
             name="ck_telemetry_batch_quarantine",
         ),
         Index("ix_telemetry_batches_delivery", "status", "next_attempt_at", "created_at"),

@@ -26,7 +26,7 @@
 | Sample replay | deterministic sample-ID plus unieke streampositie; idempotente insert | identieke retry één effect |
 | Zelfde ID, andere inhoud | canonical recordhash en conflict op ID/positie | `sample_id_conflict`, `sequence_conflict` |
 | Batch-ID replay met andere bytes | immutable batch-ID→requesthashbinding | `batch_conflict` |
-| ACK spoof/replay | bind installatie, mTLS-credential, batch-ID, requesthash, counts en monotone cursor | mismatch laat outbox intact |
+| ACK spoof/replay | bind installatie, immutable bodycredential, batch-ID, requesthash, counts en monotone cursor; actueel mTLS-credential wordt afzonderlijk via dezelfde lineage geautoriseerd | mismatch laat outbox intact |
 | ACK vóór commit | ACK uitsluitend na durable commit; response-loss retry retourneert opgeslagen ACK | crashpoint- en response-losstest |
 | Stale/forged config | ieder record bindt configVersion, snapshotId en projectionhash; Point/type tegen historische snapshot | stale/mismatch/retired vectors |
 | Credentialrenewal met backlog | recordidentiteit bevat geen mutable installationrevision/credential; transportcredential apart geautoriseerd | renewal-backlog lifecycle |

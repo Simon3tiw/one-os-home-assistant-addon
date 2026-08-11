@@ -47,6 +47,7 @@ _MAX_MATERIAL_BYTES = 64 * 1024
 _WORKER_SLOTS = threading.BoundedSemaphore(2)
 _SAFE_ERRORS = frozenset(
     {
+        "expired_payload",
         "immutable_conflict",
         "protocol_error",
         "rate_limited",
@@ -64,8 +65,11 @@ _IMMUTABLE_CONFLICT_BODIES = frozenset(
         "Telemetry stream continuity conflicts",
         "Telemetry record conflicts",
         "Telemetry gap conflicts",
+        "Telemetry credential lineage conflicts",
+        "Telemetry installation binding conflicts",
     )
 )
+_EXPIRED_PAYLOAD_BODY = b'{"detail":"Telemetry timestamp expired"}'
 
 
 class TelemetryTransportError(RuntimeError):
@@ -291,6 +295,17 @@ def _read_ack(
         )
         if payload in _IMMUTABLE_CONFLICT_BODIES:
             raise TelemetryTransportError("immutable_conflict")
+        raise TelemetryTransportError("protocol_error")
+    if response.status == 422:
+        payload = _read_framed_json(
+            connection,
+            response,
+            deadline=deadline,
+            maximum_bytes=_MAX_ERROR_BYTES,
+            require_no_store=False,
+        )
+        if payload == _EXPIRED_PAYLOAD_BODY:
+            raise TelemetryTransportError("expired_payload")
         raise TelemetryTransportError("protocol_error")
     if response.status != 201:
         raise TelemetryTransportError("protocol_error")

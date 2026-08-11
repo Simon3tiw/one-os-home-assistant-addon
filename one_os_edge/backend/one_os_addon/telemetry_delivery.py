@@ -318,7 +318,7 @@ class TelemetryDeliveryJournal:
         _uuid4(batch_id)
         if not re.fullmatch(r"[A-Za-z0-9._:-]{1,64}", owner):
             raise TelemetryDeliveryError("invalid_lease_owner")
-        if reason != "immutable_conflict":
+        if reason not in {"immutable_conflict", "expired_payload"}:
             raise TelemetryDeliveryError("invalid_terminal_reason")
         with self._session_factory() as session:
             session.execute(text("BEGIN IMMEDIATE"))

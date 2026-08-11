@@ -1,7 +1,7 @@
 {
   "artifacts": {
-    "README.md": "bfebbb2602ea15aede0f86e572c7ebeb9f3c9e247c3952ca4759b083d1cdbef9",
-    "THREAT-MODEL.md": "d7eb9de2bdba31d923d8afbd23ea2a2de88c186a1dda5b002b5809f6c48a0a9b",
+    "README.md": "dabb489ed1ee071b47bd8d73d14f3312a4259f06d68c61cc09709bc398b79c20",
+    "THREAT-MODEL.md": "a80a9d2f9b73acec66129d64beb4ec60b6438d4f93cc9d920195ad18f73f4170",
     "canonical-vectors.json": "033141d95b703db86b5dafe49d405442c74cc7de05d50c85c60a5b8ea935a9cb",
     "raw-negative-vectors.json": "bcc50dedc21ffe7c4320f9d18c0c3b4a579f3b4200f1b273a69ed0350dc2a688",
     "semantic-vectors.json": "477c68bfc7fced0323098e9431709cb35219e28b10772052e6a3a29411d3c7f3",

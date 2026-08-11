@@ -346,6 +346,8 @@ def test_rate_limit_requires_exact_retry_after(telemetry_tls_server):
         "Telemetry stream continuity conflicts",
         "Telemetry record conflicts",
         "Telemetry gap conflicts",
+        "Telemetry credential lineage conflicts",
+        "Telemetry installation binding conflicts",
     ],
 )
 def test_permanent_central_conflict_is_mapped_to_immutable_conflict(telemetry_tls_server, detail):
@@ -391,6 +393,45 @@ def test_transient_or_noncanonical_conflict_is_not_terminal(telemetry_tls_server
         )
 
 
+def test_expired_central_payload_is_terminal(telemetry_tls_server):
+    origin, fingerprint, certificate, private_key = telemetry_tls_server
+    TelemetryHandler.status = 422
+    TelemetryHandler.body = b'{"detail":"Telemetry timestamp expired"}'
+
+    with pytest.raises(TelemetryTransportError, match="^expired_payload$"):
+        _upload_in_worker(
+            origin,
+            fingerprint,
+            _vectors()["batchCanonical"].encode(),
+            certificate,
+            private_key,
+            timeout=2,
+        )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b'{"detail":"Telemetry timestamp ahead of acceptance window"}',
+        b'{"detail":"Telemetry timestamp expired","extra":true}',
+    ],
+)
+def test_future_or_noncanonical_timestamp_rejection_is_not_terminal(telemetry_tls_server, body):
+    origin, fingerprint, certificate, private_key = telemetry_tls_server
+    TelemetryHandler.status = 422
+    TelemetryHandler.body = body
+
+    with pytest.raises(TelemetryTransportError, match="^protocol_error$"):
+        _upload_in_worker(
+            origin,
+            fingerprint,
+            _vectors()["batchCanonical"].encode(),
+            certificate,
+            private_key,
+            timeout=2,
+        )
+
+
 def test_parent_transport_preserves_immutable_conflict(telemetry_tls_server):
     origin, fingerprint, certificate, private_key = telemetry_tls_server
     TelemetryHandler.status = 409
@@ -398,6 +439,16 @@ def test_parent_transport_preserves_immutable_conflict(telemetry_tls_server):
     transport = TelemetryUploadTransport(_destination(origin, fingerprint), timeout=2)
 
     with pytest.raises(TelemetryTransportError, match="^immutable_conflict$"):
+        transport.upload(_vectors()["batchCanonical"].encode(), certificate, private_key)
+
+
+def test_parent_transport_preserves_expired_payload(telemetry_tls_server):
+    origin, fingerprint, certificate, private_key = telemetry_tls_server
+    TelemetryHandler.status = 422
+    TelemetryHandler.body = b'{"detail":"Telemetry timestamp expired"}'
+    transport = TelemetryUploadTransport(_destination(origin, fingerprint), timeout=2)
+
+    with pytest.raises(TelemetryTransportError, match="^expired_payload$"):
         transport.upload(_vectors()["batchCanonical"].encode(), certificate, private_key)
 
 

@@ -233,6 +233,7 @@ def test_delivery_journal_migration_and_orm_are_in_parity(tmp_path) -> None:
     }
     assert "quarantined" in checks["ck_telemetry_batch_status"]
     assert "immutable_conflict" in checks["ck_telemetry_batch_quarantine"]
+    assert "expired_payload" in checks["ck_telemetry_batch_quarantine"]
 
     assert TelemetryBatch.__table__.name == "telemetry_batches"
     assert TelemetryBatchRecord.__table__.name == "telemetry_batch_records"
@@ -248,17 +249,50 @@ def test_quarantine_migration_cycles_empty_database_deterministically(tmp_path) 
     from alembic import command
     from alembic.config import Config
 
-    database = tmp_path / "telemetry-0012-empty.db"
+    database = tmp_path / "telemetry-0013-empty.db"
     config = Config("one_os_edge/alembic.ini")
     config.set_main_option("sqlalchemy.url", f"sqlite:///{database}")
     config.attributes["explicit_database_url"] = True
 
-    command.upgrade(config, "0012")
+    command.upgrade(config, "0013")
     command.downgrade(config, "0010")
-    command.upgrade(config, "0012")
+    command.upgrade(config, "0013")
 
     with closing(sqlite3.connect(database)) as connection:
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0012",)
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0013",)
+
+
+def test_expired_quarantine_refuses_semantics_losing_downgrade(tmp_path) -> None:
+    import sqlite3
+    from contextlib import closing
+
+    from alembic import command
+    from alembic.config import Config
+    from one_os_addon.telemetry_delivery import TelemetryDeliveryJournal
+
+    database = tmp_path / "telemetry-0013-expired.db"
+    app, spool = _pending_sample(tmp_path, database.name)
+    journal = TelemetryDeliveryJournal(
+        app.state.session,
+        spool,
+        clock=lambda: datetime(2030, 1, 1, 12, 2, tzinfo=UTC),
+    )
+    leased = journal.acquire(owner="worker-a", lease_for=timedelta(seconds=30))
+    assert leased is not None
+    journal.quarantine(
+        batch_id=leased.batch_id,
+        owner="worker-a",
+        reason="expired_payload",
+    )
+    app.state.engine.dispose()
+
+    config = Config("one_os_edge/alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite:///{database}")
+    config.attributes["explicit_database_url"] = True
+    with pytest.raises(RuntimeError, match="refusing to discard expired"):
+        command.downgrade(config, "0012")
+    with closing(sqlite3.connect(database)) as connection:
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0013",)
 
 
 def test_delivery_migration_refuses_to_drop_nonempty_journal(tmp_path) -> None:
@@ -852,13 +886,14 @@ class _InvalidAckTransport:
 
 
 class _ConflictThenAcceptTransport:
-    def __init__(self):
+    def __init__(self, terminal_error="immutable_conflict"):
+        self.terminal_error = terminal_error
         self.requests = []
 
     def upload(self, request_bytes, _certificate_pem, _private_key_pem):
         self.requests.append(request_bytes)
         if len(self.requests) == 1:
-            raise TelemetryTransportError("immutable_conflict")
+            raise TelemetryTransportError(self.terminal_error)
         return _ack_for(request_bytes)
 
 
@@ -1080,7 +1115,10 @@ def test_delivery_worker_late_fenced_401_does_not_block_newer_revision(tmp_path)
     assert worker._blocked_identity is None
 
 
-def test_immutable_conflict_is_quarantined_once_and_does_not_block_later_batch(tmp_path) -> None:
+@pytest.mark.parametrize("terminal_error", ["immutable_conflict", "expired_payload"])
+def test_terminal_batch_is_quarantined_once_and_does_not_block_later_batch(
+    tmp_path, terminal_error
+) -> None:
     from one_os_addon.telemetry_delivery import TelemetryDeliveryJournal
 
     app, spool = _pending_sample(tmp_path, "delivery-worker-quarantine.db")
@@ -1121,10 +1159,10 @@ def test_immutable_conflict_is_quarantined_once_and_does_not_block_later_batch(t
         spool,
         clock=lambda: datetime(2030, 1, 1, 12, 2, 2, tzinfo=UTC),
     )
-    transport = _ConflictThenAcceptTransport()
+    transport = _ConflictThenAcceptTransport(terminal_error)
     worker = _delivery_worker(journal, transport)
 
-    assert worker.run_once() == "immutable_conflict"
+    assert worker.run_once() == terminal_error
     restarted_worker = _delivery_worker(journal, transport)
     assert restarted_worker.run_once() == "acked"
     assert len(transport.requests) == 2
@@ -1134,7 +1172,7 @@ def test_immutable_conflict_is_quarantined_once_and_does_not_block_later_batch(t
         first = session.get(TelemetryBatch, _BATCH_ID)
         second = session.get(TelemetryBatch, second_batch_id)
         assert first is not None and first.status == "quarantined"
-        assert first.terminal_reason == "immutable_conflict"
+        assert first.terminal_reason == terminal_error
         assert first.quarantined_at == datetime(2030, 1, 1, 12, 2, 2)
         assert first.lease_owner is None and first.lease_until is None
         assert session.query(TelemetryBatchRecord).filter_by(batch_id=_BATCH_ID).count() == 1
