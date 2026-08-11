@@ -23,6 +23,7 @@ from .models import (
     EdgeIdentity,
     Point,
     Site,
+    TelemetryBatchRecord,
     TelemetryGap,
     TelemetryOutboxRecord,
     TelemetryOutboxSegment,
@@ -275,6 +276,9 @@ class TelemetryOutbox:
             with self._session_factory() as session:
                 segments = session.scalars(select(TelemetryOutboxSegment)).all()
                 records = session.scalars(select(TelemetryOutboxRecord)).all()
+                batched_sample_ids = set(
+                    session.scalars(select(TelemetryBatchRecord.sample_id)).all()
+                )
                 records_by_segment: dict[str, list[TelemetryOutboxRecord]] = {}
                 for record in records:
                     records_by_segment.setdefault(record.segment_id, []).append(record)
@@ -310,6 +314,10 @@ class TelemetryOutbox:
                     removed += 1
 
             for relative_path, (segment, segment_records) in expected.items():
+                if segment_records and all(
+                    record.sample_id in batched_sample_ids for record in segment_records
+                ):
+                    continue
                 committed_bytes = segment.committed_bytes
                 path = self._spool_dir / relative_path
                 if not path.exists():
@@ -574,6 +582,11 @@ class TelemetryOutbox:
                 TelemetryOutboxSegment,
                 TelemetryOutboxSegment.segment_id == TelemetryOutboxRecord.segment_id,
             )
+            .outerjoin(
+                TelemetryBatchRecord,
+                TelemetryBatchRecord.sample_id == TelemetryOutboxRecord.sample_id,
+            )
+            .where(TelemetryBatchRecord.sample_id.is_(None))
             .order_by(TelemetryOutboxRecord.created_at, TelemetryOutboxRecord.sequence)
         ).all()
         cleanup: list[str] = []

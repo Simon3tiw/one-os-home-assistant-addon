@@ -390,6 +390,116 @@ class TelemetryGap(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False)
 
 
+class TelemetryBatch(Base):
+    __tablename__ = "telemetry_batches"
+    __table_args__ = (
+        CheckConstraint(
+            "sample_count >= 0 AND quality_event_count >= 0 AND gap_count >= 0 AND "
+            "sample_count + quality_event_count + gap_count BETWEEN 1 AND 500",
+            name="ck_telemetry_batch_counts",
+        ),
+        CheckConstraint(
+            "length(request_bytes) BETWEEN 1 AND 1048576",
+            name="ck_telemetry_batch_request_bytes",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'leased', 'acked')",
+            name="ck_telemetry_batch_status",
+        ),
+        CheckConstraint(
+            "attempt_count >= 0 AND attempt_count <= 9223372036854775807",
+            name="ck_telemetry_batch_attempt_count",
+        ),
+        CheckConstraint(
+            "(status = 'leased' AND lease_owner IS NOT NULL AND lease_until IS NOT NULL) OR "
+            "(status != 'leased' AND lease_owner IS NULL AND lease_until IS NULL)",
+            name="ck_telemetry_batch_lease",
+        ),
+        CheckConstraint(
+            "(status = 'acked' AND ack_bytes IS NOT NULL AND ingest_cursor IS NOT NULL AND "
+            "acked_at IS NOT NULL) OR (status != 'acked' AND ack_bytes IS NULL AND "
+            "ingest_cursor IS NULL AND acked_at IS NULL)",
+            name="ck_telemetry_batch_ack",
+        ),
+        CheckConstraint(
+            "ingest_cursor IS NULL OR "
+            "(ingest_cursor >= 0 AND ingest_cursor <= 9223372036854775807)",
+            name="ck_telemetry_batch_ingest_cursor",
+        ),
+        Index("ix_telemetry_batches_delivery", "status", "next_attempt_at", "created_at"),
+    )
+    batch_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    installation_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    credential_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    payload_sha256: Mapped[str] = mapped_column(String(43), nullable=False)
+    request_sha256: Mapped[str] = mapped_column(String(43), nullable=False)
+    request_bytes: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    sample_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    quality_event_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    gap_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    lease_owner: Mapped[str | None] = mapped_column(String(64))
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ack_bytes: Mapped[bytes | None] = mapped_column(LargeBinary)
+    ingest_cursor: Mapped[int | None] = mapped_column(Integer)
+    acked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=now
+    )
+
+
+class TelemetryBatchRecord(Base):
+    __tablename__ = "telemetry_batch_records"
+    __table_args__ = (
+        CheckConstraint(
+            "record_kind IN ('sample', 'quality')", name="ck_telemetry_batch_record_kind"
+        ),
+        CheckConstraint("ordinal >= 0 AND ordinal < 500", name="ck_telemetry_batch_record_ordinal"),
+        UniqueConstraint(
+            "batch_id", "record_kind", "ordinal", name="uq_telemetry_batch_record_ordinal"
+        ),
+    )
+    sample_id: Mapped[str] = mapped_column(
+        ForeignKey("telemetry_outbox_records.sample_id"), primary_key=True
+    )
+    batch_id: Mapped[str] = mapped_column(
+        ForeignKey("telemetry_batches.batch_id", ondelete="CASCADE"), nullable=False
+    )
+    record_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class TelemetryBatchGap(Base):
+    __tablename__ = "telemetry_batch_gaps"
+    __table_args__ = (
+        CheckConstraint("ordinal >= 0 AND ordinal < 500", name="ck_telemetry_batch_gap_ordinal"),
+        UniqueConstraint("batch_id", "ordinal", name="uq_telemetry_batch_gap_ordinal"),
+    )
+    gap_id: Mapped[str] = mapped_column(ForeignKey("telemetry_gaps.gap_id"), primary_key=True)
+    batch_id: Mapped[str] = mapped_column(
+        ForeignKey("telemetry_batches.batch_id", ondelete="CASCADE"), nullable=False
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class TelemetryIngestState(Base):
+    __tablename__ = "telemetry_ingest_state"
+    __table_args__ = (
+        CheckConstraint(
+            "last_ingest_cursor >= 0 AND last_ingest_cursor <= 9223372036854775807",
+            name="ck_telemetry_ingest_cursor",
+        ),
+    )
+    installation_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    last_ingest_cursor: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=now
+    )
+
+
 class Audit(Base):
     __tablename__ = "audit"
     id: Mapped[str] = mapped_column(String, primary_key=True)
