@@ -163,3 +163,76 @@ def test_fastapi_lifespan_owns_startup_discovery_and_shutdown(tmp_path):
         assert coordinator._task is not None
 
     assert coordinator._task is None
+
+
+def test_telemetry_featureflag_recovers_before_background_sync_start(tmp_path, monkeypatch):
+    from one_os_addon.telemetry_outbox import TelemetryOutbox
+
+    fake = streaming_fake()
+    order = []
+    original_recover = TelemetryOutbox.recover
+    original_start = SyncCoordinator.start
+
+    def observed_recover(self):
+        order.append("recover")
+        return original_recover(self)
+
+    async def observed_start(self):
+        assert order == ["recover"]
+        order.append("sync-start")
+        await original_start(self)
+
+    monkeypatch.setattr(TelemetryOutbox, "recover", observed_recover)
+    monkeypatch.setattr(SyncCoordinator, "start", observed_start)
+    spool = tmp_path / "telemetry-outbox"
+    app = create_app(
+        database_url=f"sqlite:///{tmp_path / 'telemetry-lifespan.db'}",
+        ha_client=fake,
+        start_background_sync=True,
+        sync_interval=60,
+        pairing_backend=False,
+        telemetry_enabled=True,
+        telemetry_spool_dir=spool,
+    )
+
+    with TestClient(app):
+        assert order == ["recover", "sync-start"]
+        assert app.state.telemetry_outbox is not None
+        assert app.state.sync.telemetry_outbox is app.state.telemetry_outbox
+        assert app.state.telemetry_recovery == {
+            "removedOrphans": 0,
+            "truncatedSegments": 0,
+            "convertedMissingRecords": 0,
+        }
+
+    assert app.state.sync._task is None
+
+
+def test_telemetry_recovery_failure_blocks_all_background_sync(tmp_path, monkeypatch):
+    from one_os_addon.telemetry_outbox import TelemetryOutbox
+
+    started = []
+
+    def failed_recovery(_self):
+        raise RuntimeError("corrupt telemetry spool")
+
+    async def forbidden_start(_self):
+        started.append(True)
+
+    monkeypatch.setattr(TelemetryOutbox, "recover", failed_recovery)
+    monkeypatch.setattr(SyncCoordinator, "start", forbidden_start)
+    app = create_app(
+        database_url=f"sqlite:///{tmp_path / 'failed-recovery.db'}",
+        ha_client=streaming_fake(),
+        pairing_backend=False,
+        start_background_sync=True,
+        telemetry_enabled=True,
+        telemetry_spool_dir=tmp_path / "telemetry-outbox",
+    )
+
+    with pytest.raises(RuntimeError, match="corrupt telemetry spool"):
+        with TestClient(app):
+            pass
+
+    assert started == []
+    assert app.state.sync is None

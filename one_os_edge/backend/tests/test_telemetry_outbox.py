@@ -2,7 +2,7 @@ import base64
 import errno
 import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from one_os_addon.app import create_app, migrate_database
@@ -27,6 +27,7 @@ _INSTALLATION_ID = "00000000-0000-4000-8000-000000000002"
 _CREDENTIAL_ID = "11111111-1111-4111-8111-111111111111"
 _SNAPSHOT_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 _EPOCH_ID = "22222222-2222-4222-8222-222222222222"
+_EPOCH_2_ID = "88888888-8888-4888-8888-888888888888"
 _SEGMENT_ID = "33333333-3333-4333-8333-333333333333"
 _SEGMENT_2_ID = "44444444-4444-4444-8444-444444444444"
 _SEGMENT_3_ID = "55555555-5555-4555-8555-555555555555"
@@ -1157,33 +1158,209 @@ def test_future_observed_at_consumes_clock_discontinuity_gap(tmp_path) -> None:
     with app.state.session() as session:
         _selected_point_and_snapshot(session)
 
-    identifiers = iter((_EPOCH_ID, _GAP_ID))
+    identifiers = iter((_EPOCH_ID, _GAP_ID, _EPOCH_2_ID, _SEGMENT_ID))
     spool = tmp_path / "telemetry-outbox"
-    stored = TelemetryOutbox(
+    outbox = TelemetryOutbox(
         app.state.session,
         spool,
         uuid_factory=lambda: next(identifiers),
         clock=lambda: datetime(2030, 1, 1, 12, 0, tzinfo=UTC),
-    ).append_state(
+    )
+    stored = outbox.append_state(
         point_id="point-1",
         raw_value="20",
         quality="good",
         observed_at="2030-01-01T12:00:01Z",
     )
+    resumed = outbox.append_state(
+        point_id="point-1",
+        raw_value="21",
+        quality="good",
+        observed_at="2030-01-01T12:00:00Z",
+    )
 
     assert stored.document["reason"] == "clock_discontinuity"
+    assert stored.document["streamEpochId"] == _EPOCH_ID
     assert stored.document["firstMissingSequence"] == 0
     assert stored.document["lastMissingSequence"] == 0
+    assert resumed.document["streamEpochId"] == _EPOCH_2_ID
+    assert resumed.document["sequence"] == 0
     with app.state.session() as session:
         stream = session.get(TelemetryStream, "point-1")
         gap = session.scalar(select(TelemetryGap))
+        record = session.scalar(select(TelemetryOutboxRecord))
         assert stream is not None
+        assert stream.stream_epoch_id == _EPOCH_2_ID
         assert stream.next_sequence == 1
         assert gap is not None
         assert gap.reason == "clock_discontinuity"
+        assert gap.stream_epoch_id == _EPOCH_ID
+        assert record is not None
+        assert (record.stream_epoch_id, record.sequence) == (_EPOCH_2_ID, 0)
+    assert _segment_names(spool) == [f"{_SEGMENT_ID}.seg"]
+
+
+def test_operator_reset_closes_old_epoch_and_restarts_sequence_at_zero(tmp_path) -> None:
+    from one_os_addon.telemetry_outbox import TelemetryOutbox
+
+    app = create_app(
+        database_url=f"sqlite:///{tmp_path / 'commissioning.db'}", pairing_backend=False
+    )
+    with app.state.session() as session:
+        _selected_point_and_snapshot(session)
+
+    identifiers = iter((_EPOCH_ID, _SEGMENT_ID, _GAP_ID, _EPOCH_2_ID, _SEGMENT_2_ID))
+    spool = tmp_path / "telemetry-outbox"
+    outbox = TelemetryOutbox(
+        app.state.session,
+        spool,
+        uuid_factory=lambda: next(identifiers),
+        clock=lambda: datetime(2030, 1, 1, 12, 0, tzinfo=UTC),
+    )
+    first = outbox.append_state(
+        point_id="point-1",
+        raw_value="20",
+        quality="good",
+        observed_at="2030-01-01T12:00:00Z",
+    )
+    reset = outbox.reset_stream(point_id="point-1", reason="operator_reset")
+    resumed = outbox.append_state(
+        point_id="point-1",
+        raw_value="21",
+        quality="good",
+        observed_at="2030-01-01T12:00:00Z",
+    )
+
+    assert (first.document["streamEpochId"], first.document["sequence"]) == (_EPOCH_ID, 0)
+    assert reset.document["reason"] == "operator_reset"
+    assert reset.document["streamEpochId"] == _EPOCH_ID
+    assert (reset.document["firstMissingSequence"], reset.document["lastMissingSequence"]) == (
+        1,
+        1,
+    )
+    assert (resumed.document["streamEpochId"], resumed.document["sequence"]) == (
+        _EPOCH_2_ID,
+        0,
+    )
+    with app.state.session() as session:
+        stream = session.get(TelemetryStream, "point-1")
+        records = session.scalars(
+            select(TelemetryOutboxRecord).order_by(
+                TelemetryOutboxRecord.stream_epoch_id,
+                TelemetryOutboxRecord.sequence,
+            )
+        ).all()
+        gap = session.scalar(select(TelemetryGap))
+        assert stream is not None
+        assert (stream.stream_epoch_id, stream.next_sequence) == (_EPOCH_2_ID, 1)
+        assert {(record.stream_epoch_id, record.sequence) for record in records} == {
+            (_EPOCH_ID, 0),
+            (_EPOCH_2_ID, 0),
+        }
+        assert gap is not None
+        assert (gap.stream_epoch_id, gap.first_missing_sequence, gap.reason) == (
+            _EPOCH_ID,
+            1,
+            "operator_reset",
+        )
+
+
+def test_retention_converts_old_epoch_backlog_after_stream_reset(tmp_path) -> None:
+    from one_os_addon.telemetry_outbox import TelemetryOutbox
+
+    app = create_app(
+        database_url=f"sqlite:///{tmp_path / 'commissioning.db'}", pairing_backend=False
+    )
+    with app.state.session() as session:
+        _selected_point_and_snapshot(session)
+
+    identifiers = iter((_EPOCH_ID, _SEGMENT_ID, _GAP_ID, _EPOCH_2_ID, _SEGMENT_3_ID, _SEGMENT_2_ID))
+    spool = tmp_path / "telemetry-outbox"
+    initial = TelemetryOutbox(
+        app.state.session,
+        spool,
+        uuid_factory=lambda: next(identifiers),
+        clock=lambda: datetime(2030, 1, 1, 12, 0, tzinfo=UTC),
+    )
+    initial.append_state(
+        point_id="point-1",
+        raw_value="20",
+        quality="good",
+        observed_at="2030-01-01T12:00:00Z",
+    )
+    initial.reset_stream(point_id="point-1", reason="operator_reset")
+
+    resumed = TelemetryOutbox(
+        app.state.session,
+        spool,
+        uuid_factory=lambda: next(identifiers),
+        clock=lambda: datetime(2030, 1, 9, 12, 0, tzinfo=UTC),
+        max_age=timedelta(days=7),
+    ).append_state(
+        point_id="point-1",
+        raw_value="21",
+        quality="good",
+        observed_at="2030-01-09T12:00:00Z",
+    )
+
+    assert (resumed.document["streamEpochId"], resumed.document["sequence"]) == (
+        _EPOCH_2_ID,
+        0,
+    )
+    with app.state.session() as session:
+        old_record = session.scalar(
+            select(TelemetryOutboxRecord).where(TelemetryOutboxRecord.stream_epoch_id == _EPOCH_ID)
+        )
+        retention_gap = session.scalar(
+            select(TelemetryGap).where(TelemetryGap.reason == "retention_expired")
+        )
+        assert old_record is None
+        assert retention_gap is not None
+        assert (retention_gap.stream_epoch_id, retention_gap.first_missing_sequence) == (
+            _EPOCH_ID,
+            0,
+        )
+
+
+def test_recovery_converts_missing_old_epoch_segment_after_stream_reset(tmp_path) -> None:
+    from one_os_addon.telemetry_outbox import TelemetryOutbox
+
+    app = create_app(
+        database_url=f"sqlite:///{tmp_path / 'commissioning.db'}", pairing_backend=False
+    )
+    with app.state.session() as session:
+        _selected_point_and_snapshot(session)
+
+    identifiers = iter((_EPOCH_ID, _SEGMENT_ID, _GAP_ID, _EPOCH_2_ID, _SEGMENT_2_ID))
+    spool = tmp_path / "telemetry-outbox"
+    outbox = TelemetryOutbox(
+        app.state.session,
+        spool,
+        uuid_factory=lambda: next(identifiers),
+        clock=lambda: datetime(2030, 1, 1, 12, 0, tzinfo=UTC),
+    )
+    outbox.append_state(
+        point_id="point-1",
+        raw_value="20",
+        quality="good",
+        observed_at="2030-01-01T12:00:00Z",
+    )
+    outbox.reset_stream(point_id="point-1", reason="operator_reset")
+    (spool / f"{_SEGMENT_ID}.seg").unlink()
+
+    result = outbox.recover()
+
+    assert result["convertedMissingRecords"] == 1
+    with app.state.session() as session:
         assert session.scalar(select(TelemetryOutboxRecord)) is None
-        assert session.scalar(select(TelemetryOutboxSegment)) is None
-    assert _segment_names(spool) == []
+        storage_gap = session.scalar(
+            select(TelemetryGap).where(TelemetryGap.reason == "storage_failure")
+        )
+        assert storage_gap is not None
+        assert (storage_gap.stream_epoch_id, storage_gap.first_missing_sequence) == (
+            _EPOCH_ID,
+            0,
+        )
 
 
 def test_expired_contiguous_sequences_coalesce_into_one_pending_gap(tmp_path) -> None:

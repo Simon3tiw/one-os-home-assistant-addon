@@ -499,6 +499,7 @@ class TelemetryOutbox:
         detected_at: datetime,
         cleanup_paths: tuple[str, ...] = (),
         control_reserve_released: bool = False,
+        reset_stream_epoch: bool = False,
     ) -> StoredTelemetryRecord:
         gap = self._add_gap(
             session,
@@ -529,7 +530,12 @@ class TelemetryOutbox:
             "detectedAt": _edge_timestamp(gap_detected_at),
             "reason": gap.reason,
         }
-        stream.next_sequence += 1
+        if reset_stream_epoch:
+            stream.stream_epoch_id = _uuid4(self._uuid_factory())
+            stream.next_sequence = 0
+            stream.created_at = detected_at
+        else:
+            stream.next_sequence += 1
         stream.updated_at = detected_at
         return StoredTelemetryRecord(
             document=document,
@@ -540,7 +546,7 @@ class TelemetryOutbox:
 
     def _gap_for_record(self, session, record, *, reason: str, detected_at: datetime) -> None:
         stream = session.get(TelemetryStream, record.point_id)
-        if stream is None or stream.stream_epoch_id != record.stream_epoch_id:
+        if stream is None:
             raise TelemetryOutboxError("gap_stream_missing")
         self._add_gap(
             session,
@@ -639,6 +645,59 @@ class TelemetryOutbox:
             raise TelemetryOutboxError("point_not_in_acked_snapshot")
         return snapshot, matches[0]
 
+    def reset_stream(
+        self,
+        *,
+        point_id: str,
+        reason: str,
+        db_session=None,
+    ) -> StoredTelemetryRecord:
+        if reason != "operator_reset":
+            raise TelemetryOutboxError("invalid_stream_reset_reason")
+        with self._lock:
+            self._ensure_spool()
+            now = self._clock().astimezone(UTC)
+            session_context = (
+                self._session_factory() if db_session is None else nullcontext(db_session)
+            )
+            with session_context as session:
+                point = session.get(Point, point_id)
+                if (
+                    point is None
+                    or point.selection_intent != "include"
+                    or point.review_status != "reviewed"
+                    or point.lifecycle != "active"
+                ):
+                    raise TelemetryOutboxError("point_not_telemetry_eligible")
+                snapshot, _point_node = self._binding(session, point)
+                stream = session.get(TelemetryStream, point.id)
+                if stream is None:
+                    raise TelemetryOutboxError("stream_missing")
+                if stream.installation_id != snapshot.installation_id:
+                    raise TelemetryOutboxError("stream_installation_mismatch")
+                if stream.next_sequence >= MAX_SIGNED_INT64:
+                    raise TelemetryOutboxError("stream_sequence_exhausted")
+                cleanup_paths = self._prepare_retention(session, incoming_bytes=0, now=now)
+                stored = self._consume_gap(
+                    session,
+                    snapshot=snapshot,
+                    point=point,
+                    stream=stream,
+                    reason=reason,
+                    detected_at=now,
+                    cleanup_paths=cleanup_paths,
+                    reset_stream_epoch=True,
+                )
+                if db_session is None:
+                    try:
+                        session.commit()
+                    except Exception:
+                        session.rollback()
+                        self.abort_before_commit(stored)
+                        raise
+                    self.finalize_after_commit(stored)
+                return stored
+
     def append_state(
         self,
         *,
@@ -702,6 +761,7 @@ class TelemetryOutbox:
                         reason="clock_discontinuity",
                         detected_at=now,
                         cleanup_paths=cleanup_paths,
+                        reset_stream_epoch=True,
                     )
                     if db_session is None:
                         try:

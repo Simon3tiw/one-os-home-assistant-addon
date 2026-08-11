@@ -56,6 +56,7 @@ from .pairing_storage import IdentityStore
 from .pairing_worker import PairingWorker
 from .reconciliation import infer_ontology_class, reconcile
 from .sync import SyncCoordinator
+from .telemetry_outbox import TelemetryOutbox
 from .version import RELEASE_VERSION
 
 
@@ -484,6 +485,8 @@ def create_app(
     identity_dir=None,
     pairing_backend=None,
     start_pairing_worker=True,
+    telemetry_enabled=False,
+    telemetry_spool_dir=None,
 ):
     app = FastAPI(
         title="ONE.OS commissioning API", version="1.0.0", root_path=os.getenv("INGRESS_PATH", "")
@@ -535,6 +538,15 @@ def create_app(
     app.state.csrf_ttl_seconds = csrf_ttl_seconds
     app.state.engine = engine
     app.state.sync = None
+    app.state.telemetry_outbox = (
+        TelemetryOutbox(
+            app.state.session,
+            Path(telemetry_spool_dir or os.getenv("TELEMETRY_SPOOL_DIR", "/data/telemetry-outbox")),
+        )
+        if telemetry_enabled
+        else None
+    )
+    app.state.telemetry_recovery = None
     app.state.destination_tester = destination_tester or test_pinned_discovery
 
     if pairing_backend is not False:
@@ -574,6 +586,8 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app):
+        if app.state.telemetry_outbox:
+            app.state.telemetry_recovery = app.state.telemetry_outbox.recover()
         if app.state.pairing_worker:
             await app.state.pairing_worker.start()
         if start_background_sync:
@@ -581,6 +595,7 @@ def create_app(
                 app.state.ha,
                 app.state.session,
                 full_interval=sync_interval,
+                telemetry_outbox=app.state.telemetry_outbox,
             )
             await app.state.sync.start()
         try:
@@ -1471,4 +1486,7 @@ def create_app(
     return app
 
 
-app = create_app(start_background_sync=True)
+app = create_app(
+    start_background_sync=True,
+    telemetry_enabled=os.getenv("ONE_OS_TELEMETRY_ENABLED", "false").strip().lower() == "true",
+)
