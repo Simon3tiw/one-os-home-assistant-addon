@@ -268,6 +268,128 @@ class ConfigurationSnapshot(Base):
     acked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class TelemetryStream(Base):
+    __tablename__ = "telemetry_streams"
+    __table_args__ = (
+        CheckConstraint(
+            "next_sequence >= 0 AND next_sequence <= 9223372036854775807",
+            name="ck_telemetry_stream_next_sequence",
+        ),
+        UniqueConstraint("stream_epoch_id", name="uq_telemetry_stream_epoch"),
+    )
+    point_id: Mapped[str] = mapped_column(ForeignKey("points.id"), primary_key=True)
+    installation_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    stream_epoch_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    next_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=now
+    )
+
+
+class TelemetryOutboxSegment(Base):
+    __tablename__ = "telemetry_outbox_segments"
+    __table_args__ = (
+        CheckConstraint(
+            "committed_bytes >= 0 AND live_bytes >= 0 AND live_bytes <= committed_bytes",
+            name="ck_telemetry_segment_bytes",
+        ),
+        UniqueConstraint("relative_path", name="uq_telemetry_segment_path"),
+    )
+    segment_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    relative_path: Mapped[str] = mapped_column(String(80), nullable=False)
+    committed_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    live_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    sealed: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=now
+    )
+
+
+class TelemetryOutboxRecord(Base):
+    __tablename__ = "telemetry_outbox_records"
+    __table_args__ = (
+        CheckConstraint(
+            "sequence >= 0 AND sequence <= 9223372036854775807",
+            name="ck_telemetry_record_sequence",
+        ),
+        CheckConstraint(
+            "config_version >= 0 AND config_version <= 9223372036854775807",
+            name="ck_telemetry_record_config_version",
+        ),
+        CheckConstraint("record_kind IN ('sample', 'quality')", name="ck_telemetry_record_kind"),
+        CheckConstraint(
+            "segment_offset >= 0 AND record_length > 0 AND record_length <= 1024",
+            name="ck_telemetry_record_location",
+        ),
+        UniqueConstraint(
+            "point_id",
+            "stream_epoch_id",
+            "sequence",
+            name="uq_telemetry_record_stream_sequence",
+        ),
+        Index("ix_telemetry_outbox_records_created", "created_at", "sample_id"),
+    )
+    sample_id: Mapped[str] = mapped_column(String(43), primary_key=True)
+    point_id: Mapped[str] = mapped_column(ForeignKey("points.id"), nullable=False)
+    stream_epoch_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    record_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    config_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    snapshot_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    projection_sha256: Mapped[str] = mapped_column(String(43), nullable=False)
+    segment_id: Mapped[str] = mapped_column(
+        ForeignKey("telemetry_outbox_segments.segment_id"), nullable=False
+    )
+    segment_offset: Mapped[int] = mapped_column(Integer, nullable=False)
+    record_length: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=now
+    )
+
+
+class TelemetryGap(Base):
+    __tablename__ = "telemetry_gaps"
+    __table_args__ = (
+        CheckConstraint(
+            "first_missing_sequence >= 0 AND "
+            "last_missing_sequence <= 9223372036854775807 AND "
+            "first_missing_sequence <= last_missing_sequence",
+            name="ck_telemetry_gap_range",
+        ),
+        CheckConstraint(
+            "reason IN ('outbox_capacity', 'retention_expired', 'storage_failure', "
+            "'clock_discontinuity', 'operator_reset')",
+            name="ck_telemetry_gap_reason",
+        ),
+        CheckConstraint("status IN ('pending', 'acked')", name="ck_telemetry_gap_status"),
+        UniqueConstraint(
+            "point_id",
+            "stream_epoch_id",
+            "first_missing_sequence",
+            "last_missing_sequence",
+            "reason",
+            name="uq_telemetry_gap_range_reason",
+        ),
+    )
+    gap_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    installation_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    point_id: Mapped[str] = mapped_column(ForeignKey("points.id"), nullable=False)
+    stream_epoch_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    config_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    snapshot_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    projection_sha256: Mapped[str] = mapped_column(String(43), nullable=False)
+    first_missing_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    last_missing_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    detected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=now
+    )
+    reason: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+
+
 class Audit(Base):
     __tablename__ = "audit"
     id: Mapped[str] = mapped_column(String, primary_key=True)

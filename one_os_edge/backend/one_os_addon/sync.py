@@ -11,6 +11,7 @@ from sqlalchemy import select
 
 from .models import Point
 from .reconciliation import evidence, project_capability, quality, reconcile, record_evidence
+from .telemetry_outbox import TelemetryOutboxError
 
 
 class SyncCoordinator:
@@ -26,9 +27,11 @@ class SyncCoordinator:
         base_backoff: float = 1,
         max_backoff: float = 60,
         jitter: float = 0.2,
+        telemetry_outbox=None,
     ):
         self.ha = ha
         self.session_factory = session_factory
+        self.telemetry_outbox = telemetry_outbox
         self.full_interval = full_interval
         self.registry_debounce = registry_debounce
         self.base_backoff = base_backoff
@@ -87,18 +90,44 @@ class SyncCoordinator:
             if point.evidence_hash and point.evidence_hash != ev_hash:
                 point.cloud_control_enabled = False
                 point.capability_review_required = True
-            point.raw_value = state.get("state")
-            point.attributes_json = json.dumps(attrs)
-            point.updated_at = state.get("last_updated")
-            point.quality = quality(state)
-            point.source_unit = attrs.get("unit_of_measurement")
-            point.evidence_json = ev_json
-            point.evidence_hash = ev_hash
-            point.capability_json = json.dumps(project_capability(ev))
-            point.lifecycle = "active"
-            point.revision += 1
-            record_evidence(db, point, ev_json, ev_hash)
-            db.commit()
+            state_quality = quality(state)
+            stored_telemetry = None
+            if self.telemetry_outbox is not None:
+                try:
+                    stored_telemetry = self.telemetry_outbox.append_state(
+                        point_id=point.id,
+                        raw_value=state.get("state"),
+                        quality=state_quality,
+                        observed_at=state.get("last_updated"),
+                        db_session=db,
+                    )
+                except TelemetryOutboxError as exc:
+                    if str(exc) not in {
+                        "acked_snapshot_missing",
+                        "point_not_in_acked_snapshot",
+                        "point_not_telemetry_eligible",
+                    }:
+                        raise
+            try:
+                point.raw_value = state.get("state")
+                point.attributes_json = json.dumps(attrs)
+                point.updated_at = state.get("last_updated")
+                point.quality = state_quality
+                point.source_unit = attrs.get("unit_of_measurement")
+                point.evidence_json = ev_json
+                point.evidence_hash = ev_hash
+                point.capability_json = json.dumps(project_capability(ev))
+                point.lifecycle = "active"
+                point.revision += 1
+                record_evidence(db, point, ev_json, ev_hash)
+                db.commit()
+            except Exception:
+                db.rollback()
+                if stored_telemetry is not None and self.telemetry_outbox is not None:
+                    self.telemetry_outbox.abort_before_commit(stored_telemetry)
+                raise
+            if stored_telemetry is not None and self.telemetry_outbox is not None:
+                self.telemetry_outbox.finalize_after_commit(stored_telemetry)
         return True
 
     async def _consume_states(self, generation: int) -> None:

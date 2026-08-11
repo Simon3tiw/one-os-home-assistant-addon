@@ -17,3 +17,5 @@ backup: cold
 backup_exclude:
   - identity
   - identity/**
+  - telemetry-outbox
+  - telemetry-outbox/**

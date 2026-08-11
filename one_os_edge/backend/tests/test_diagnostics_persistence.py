@@ -346,7 +346,7 @@ def test_cold_backup_restore_preserves_complete_commissioning_state(tmp_path, fa
         assert not (restored_identity / "identity-private-key.pem").exists()
     restored_app.state.engine.dispose()
     with closing(sqlite3.connect(restored)) as connection:
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0009",)
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0010",)
 
 
 def test_app_database_is_migrated_to_alembic_head(tmp_path, fake_ha):
@@ -359,7 +359,7 @@ def test_app_database_is_migrated_to_alembic_head(tmp_path, fake_ha):
     app = create_app(database_url=f"sqlite:///{database}", ha_client=fake_ha)
     app.state.engine.dispose()
     with closing(sqlite3.connect(database)) as connection:
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0009",)
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0010",)
 
 
 def test_explicit_database_url_wins_over_ambient_database_url(tmp_path, fake_ha, monkeypatch):
@@ -376,7 +376,7 @@ def test_explicit_database_url_wins_over_ambient_database_url(tmp_path, fake_ha,
     app.state.engine.dispose()
 
     with closing(sqlite3.connect(explicit)) as connection:
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0009",)
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0010",)
         assert connection.execute("SELECT COUNT(*) FROM edge_identity").fetchone() == (1,)
     assert not ambient.exists()
 

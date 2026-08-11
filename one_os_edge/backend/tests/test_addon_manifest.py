@@ -16,7 +16,12 @@ def test_addon_backup_excludes_private_edge_identity() -> None:
     assert "panel_admin" not in manifest  # Home Assistant defaults this to true.
     assert manifest["homeassistant_api"] is True
     assert "hassio_api" not in manifest
-    assert manifest["backup_exclude"] == ["identity", "identity/**"]
+    assert manifest["backup_exclude"] == [
+        "identity",
+        "identity/**",
+        "telemetry-outbox",
+        "telemetry-outbox/**",
+    ]
 
 
 def test_release_version_is_consistent_across_runtime_and_package_metadata() -> None:
