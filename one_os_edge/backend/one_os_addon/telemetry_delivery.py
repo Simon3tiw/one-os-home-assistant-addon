@@ -308,6 +308,44 @@ class TelemetryDeliveryJournal:
             _fsync_directory(self._spool_dir)
         return ack
 
+    def quarantine(
+        self,
+        *,
+        batch_id: str,
+        owner: str,
+        reason: str,
+    ) -> None:
+        _uuid4(batch_id)
+        if not re.fullmatch(r"[A-Za-z0-9._:-]{1,64}", owner):
+            raise TelemetryDeliveryError("invalid_lease_owner")
+        if reason != "immutable_conflict":
+            raise TelemetryDeliveryError("invalid_terminal_reason")
+        with self._session_factory() as session:
+            session.execute(text("BEGIN IMMEDIATE"))
+            now = self._clock()
+            if now.tzinfo is None:
+                raise TelemetryDeliveryError("naive_clock")
+            now = now.astimezone(UTC)
+            batch = session.get(TelemetryBatch, batch_id)
+            if batch is None:
+                raise TelemetryDeliveryError("batch_missing")
+            if batch.status != "leased" or batch.lease_owner != owner:
+                raise TelemetryDeliveryError("lease_not_owned")
+            if batch.lease_until is None:
+                raise TelemetryDeliveryError("invalid_lease_state")
+            lease_until = batch.lease_until
+            if lease_until.tzinfo is None:
+                lease_until = lease_until.replace(tzinfo=UTC)
+            if lease_until <= now:
+                raise TelemetryDeliveryError("lease_expired")
+            batch.status = "quarantined"
+            batch.lease_owner = None
+            batch.lease_until = None
+            batch.next_attempt_at = None
+            batch.terminal_reason = reason
+            batch.quarantined_at = now
+            session.commit()
+
     def _read_record(
         self,
         record: TelemetryOutboxRecord,

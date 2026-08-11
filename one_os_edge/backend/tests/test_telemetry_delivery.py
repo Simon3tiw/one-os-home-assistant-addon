@@ -19,6 +19,8 @@ from one_os_addon.models import (
     TelemetryOutboxSegment,
 )
 from one_os_addon.telemetry_contract_v1 import canonical_json, parse_telemetry_batch
+from one_os_addon.telemetry_transport import TelemetryTransportError
+from one_os_addon.telemetry_worker import TelemetryDeliveryWorker
 from sqlalchemy import inspect, select
 
 _INSTALLATION_ID = "00000000-0000-4000-8000-000000000002"
@@ -28,6 +30,20 @@ _EPOCH_ID = "22222222-2222-4222-8222-222222222222"
 _SEGMENT_ID = "33333333-3333-4333-8333-333333333333"
 _BATCH_ID = "44444444-4444-4444-8444-444444444444"
 _PROJECTION_SHA256 = "wSVUqL2kxfm_YRmU5wB4Lfm8KmbyOJjeVIdmKa73RVc"
+
+
+def _delivery_identity():
+    return {
+        "status": "paired",
+        "installationId": _INSTALLATION_ID,
+        "credentialId": _CREDENTIAL_ID,
+        "activeSpkiSha256": "spki",
+        "certificateSha256": "certificate",
+        "certificateNotAfter": "2030-01-02T12:00:00Z",
+        "revision": 7,
+        "certificatePem": "certificatechain",
+        "privateKeyPem": "private-key",
+    }
 
 
 def _b64digest(value: bytes) -> str:
@@ -201,6 +217,8 @@ def test_delivery_journal_migration_and_orm_are_in_parity(tmp_path) -> None:
             "ack_bytes",
             "ingest_cursor",
             "acked_at",
+            "terminal_reason",
+            "quarantined_at",
             "created_at",
         },
         "telemetry_batch_records": {"sample_id", "batch_id", "record_kind", "ordinal"},
@@ -209,6 +227,12 @@ def test_delivery_journal_migration_and_orm_are_in_parity(tmp_path) -> None:
     }
     for table, columns in expected_columns.items():
         assert {column["name"] for column in inspector.get_columns(table)} == columns
+    checks = {
+        constraint["name"]: constraint["sqltext"]
+        for constraint in inspector.get_check_constraints("telemetry_batches")
+    }
+    assert "quarantined" in checks["ck_telemetry_batch_status"]
+    assert "immutable_conflict" in checks["ck_telemetry_batch_quarantine"]
 
     assert TelemetryBatch.__table__.name == "telemetry_batches"
     assert TelemetryBatchRecord.__table__.name == "telemetry_batch_records"
@@ -217,24 +241,24 @@ def test_delivery_journal_migration_and_orm_are_in_parity(tmp_path) -> None:
     app.state.engine.dispose()
 
 
-def test_delivery_migration_cycles_empty_database_deterministically(tmp_path) -> None:
+def test_quarantine_migration_cycles_empty_database_deterministically(tmp_path) -> None:
     import sqlite3
     from contextlib import closing
 
     from alembic import command
     from alembic.config import Config
 
-    database = tmp_path / "telemetry-0011-empty.db"
+    database = tmp_path / "telemetry-0012-empty.db"
     config = Config("one_os_edge/alembic.ini")
     config.set_main_option("sqlalchemy.url", f"sqlite:///{database}")
     config.attributes["explicit_database_url"] = True
 
-    command.upgrade(config, "0011")
+    command.upgrade(config, "0012")
     command.downgrade(config, "0010")
-    command.upgrade(config, "0011")
+    command.upgrade(config, "0012")
 
     with closing(sqlite3.connect(database)) as connection:
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0011",)
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0012",)
 
 
 def test_delivery_migration_refuses_to_drop_nonempty_journal(tmp_path) -> None:
@@ -779,3 +803,434 @@ def test_acquire_starts_lease_deadline_after_sqlite_write_lock(tmp_path) -> None
     if lease_until.tzinfo is None:
         lease_until = lease_until.replace(tzinfo=UTC)
     assert lease_until == datetime(2030, 1, 1, 12, 2, tzinfo=UTC)
+
+
+def _ack_for(request_bytes: bytes) -> bytes:
+    parsed = parse_telemetry_batch(request_bytes)
+    document = parsed.document
+    return canonical_json(
+        {
+            "schemaVersion": "1.0",
+            "installationId": document["installationId"],
+            "credentialId": document["credentialId"],
+            "batchId": document["batchId"],
+            "requestSha256": parsed.request_sha256,
+            "acceptedSamples": len(document["samples"]),
+            "duplicateSamples": 0,
+            "acceptedQualityEvents": len(document["qualityEvents"]),
+            "duplicateQualityEvents": 0,
+            "acceptedGaps": len(document["gaps"]),
+            "duplicateGaps": 0,
+            "ingestCursor": 1,
+            "acceptedAt": "2030-01-01T12:02:01Z",
+        }
+    )
+
+
+class _AcceptingTransport:
+    def __init__(self):
+        self.requests = []
+
+    def upload(self, request_bytes, certificate_pem, private_key_pem):
+        self.requests.append((request_bytes, certificate_pem, private_key_pem))
+        return _ack_for(request_bytes)
+
+
+class _FailingTransport:
+    def __init__(self, code="unreachable"):
+        self.code = code
+        self.requests = []
+
+    def upload(self, request_bytes, certificate_pem, private_key_pem):
+        self.requests.append((request_bytes, certificate_pem, private_key_pem))
+        raise TelemetryTransportError(self.code)
+
+
+class _InvalidAckTransport:
+    def upload(self, _request_bytes, _certificate_pem, _private_key_pem):
+        return b"{}"
+
+
+class _ConflictThenAcceptTransport:
+    def __init__(self):
+        self.requests = []
+
+    def upload(self, request_bytes, _certificate_pem, _private_key_pem):
+        self.requests.append(request_bytes)
+        if len(self.requests) == 1:
+            raise TelemetryTransportError("immutable_conflict")
+        return _ack_for(request_bytes)
+
+
+def _delivery_worker(journal, transport, *, identity_provider=_delivery_identity):
+    return TelemetryDeliveryWorker(
+        journal,
+        identity_provider,
+        lambda _credential_id, _revision: True,
+        transport,
+        owner="worker-a",
+        random_uniform=lambda _floor, _ceiling: 5,
+        clock=lambda: datetime(2030, 1, 1, 12, 2, tzinfo=UTC),
+    )
+
+
+def test_delivery_worker_fails_closed_before_lease_when_identity_is_ineligible(tmp_path) -> None:
+    from one_os_addon.telemetry_delivery import TelemetryDeliveryJournal
+
+    app, spool = _pending_sample(tmp_path, "delivery-worker-ineligible.db")
+    journal = TelemetryDeliveryJournal(
+        app.state.session,
+        spool,
+        clock=lambda: datetime(2030, 1, 1, 12, 2, tzinfo=UTC),
+    )
+    identity = _delivery_identity()
+    identity["status"] = "repair_required"
+    transport = _AcceptingTransport()
+
+    result = _delivery_worker(journal, transport, identity_provider=lambda: identity).run_once()
+
+    assert result == "identity_ineligible"
+    assert transport.requests == []
+    with app.state.session() as session:
+        batch = session.get(TelemetryBatch, _BATCH_ID)
+        assert batch is not None and batch.status == "pending" and batch.attempt_count == 0
+
+
+def test_delivery_worker_commits_exact_ack_and_uses_active_material(tmp_path) -> None:
+    from one_os_addon.telemetry_delivery import TelemetryDeliveryJournal
+
+    app, spool = _pending_sample(tmp_path, "delivery-worker-ack.db")
+    journal = TelemetryDeliveryJournal(
+        app.state.session,
+        spool,
+        clock=lambda: datetime(2030, 1, 1, 12, 2, tzinfo=UTC),
+    )
+    transport = _AcceptingTransport()
+
+    assert _delivery_worker(journal, transport).run_once() == "acked"
+
+    assert len(transport.requests) == 1
+    request_bytes, certificate, private_key = transport.requests[0]
+    assert parse_telemetry_batch(request_bytes).document["credentialId"] == _CREDENTIAL_ID
+    assert certificate == "certificatechain"
+    assert private_key == "private-key"
+    with app.state.session() as session:
+        batch = session.get(TelemetryBatch, _BATCH_ID)
+        assert batch is not None and batch.status == "acked"
+        assert batch.ack_bytes == _ack_for(request_bytes)
+        state = session.get(TelemetryIngestState, _INSTALLATION_ID)
+        assert state is not None and state.last_ingest_cursor == 1
+
+
+def test_delivery_worker_keeps_old_batch_bytes_but_uses_renewed_active_identity(tmp_path) -> None:
+    from one_os_addon.telemetry_delivery import TelemetryDeliveryJournal
+
+    app, spool = _pending_sample(tmp_path, "delivery-worker-renewed-identity.db")
+    journal = TelemetryDeliveryJournal(
+        app.state.session,
+        spool,
+        clock=lambda: datetime(2030, 1, 1, 12, 2, tzinfo=UTC),
+    )
+    renewed = _delivery_identity()
+    renewed["credentialId"] = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    transport = _AcceptingTransport()
+
+    result = _delivery_worker(journal, transport, identity_provider=lambda: renewed).run_once()
+
+    assert result == "acked"
+    request_bytes, certificate, private_key = transport.requests[0]
+    assert parse_telemetry_batch(request_bytes).document["credentialId"] == _CREDENTIAL_ID
+    assert certificate == "certificatechain"
+    assert private_key == "private-key"
+
+
+def test_delivery_worker_materializes_outbox_before_leasing_and_uploading(tmp_path) -> None:
+    from one_os_addon.telemetry_delivery import TelemetryDeliveryJournal
+
+    app, spool = _pending_sample(tmp_path, "delivery-worker-materializes.db")
+    with app.state.session() as session:
+        existing = session.get(TelemetryBatch, _BATCH_ID)
+        assert existing is not None
+        session.delete(existing)
+        session.commit()
+        assert session.query(TelemetryBatch).count() == 0
+        assert session.query(TelemetryBatchRecord).count() == 0
+        assert session.query(TelemetryOutboxRecord).count() == 1
+    journal = TelemetryDeliveryJournal(
+        app.state.session,
+        spool,
+        uuid_factory=lambda: _BATCH_ID,
+        clock=lambda: datetime(2030, 1, 1, 12, 2, tzinfo=UTC),
+    )
+    transport = _AcceptingTransport()
+
+    assert _delivery_worker(journal, transport).run_once() == "acked"
+
+    assert len(transport.requests) == 1
+    uploaded = parse_telemetry_batch(transport.requests[0][0]).document
+    assert len(uploaded["samples"]) == 1
+    with app.state.session() as session:
+        batch = session.get(TelemetryBatch, _BATCH_ID)
+        assert batch is not None and batch.status == "acked"
+        assert session.query(TelemetryBatchRecord).count() == 0
+        assert session.query(TelemetryOutboxRecord).count() == 0
+
+
+def test_delivery_worker_releases_invalid_ack_without_cleaning_batch(tmp_path) -> None:
+    from one_os_addon.telemetry_delivery import TelemetryDeliveryJournal
+
+    app, spool = _pending_sample(tmp_path, "delivery-worker-invalid-ack.db")
+    journal = TelemetryDeliveryJournal(
+        app.state.session,
+        spool,
+        clock=lambda: datetime(2030, 1, 1, 12, 2, tzinfo=UTC),
+    )
+
+    assert _delivery_worker(journal, _InvalidAckTransport()).run_once() == "invalid_ack"
+
+    with app.state.session() as session:
+        batch = session.get(TelemetryBatch, _BATCH_ID)
+        assert batch is not None and batch.status == "pending" and batch.ack_bytes is None
+        assert session.query(TelemetryBatchRecord).count() == 1
+        assert session.query(TelemetryOutboxRecord).count() == 1
+
+
+@pytest.mark.parametrize("code", ["unreachable", "rate_limited", "trust_error"])
+def test_delivery_worker_releases_transport_failure_for_durable_retry(tmp_path, code) -> None:
+    from one_os_addon.telemetry_delivery import TelemetryDeliveryJournal
+
+    app, spool = _pending_sample(tmp_path, f"delivery-worker-{code}.db")
+    journal = TelemetryDeliveryJournal(
+        app.state.session,
+        spool,
+        clock=lambda: datetime(2030, 1, 1, 12, 2, tzinfo=UTC),
+    )
+
+    assert _delivery_worker(journal, _FailingTransport(code)).run_once() == code
+
+    with app.state.session() as session:
+        batch = session.get(TelemetryBatch, _BATCH_ID)
+        assert batch is not None and batch.status == "pending"
+        assert batch.attempt_count == 1
+        expected_delay = 5
+        next_attempt = batch.next_attempt_at
+        assert next_attempt is not None
+        if next_attempt.tzinfo is None:
+            next_attempt = next_attempt.replace(tzinfo=UTC)
+        assert next_attempt == datetime(2030, 1, 1, 12, 2, expected_delay, tzinfo=UTC)
+
+
+def test_delivery_worker_revocation_marks_identity_and_blocks_second_upload(tmp_path) -> None:
+    from one_os_addon.telemetry_delivery import TelemetryDeliveryJournal
+
+    app, spool = _pending_sample(tmp_path, "delivery-worker-revoked.db")
+    journal = TelemetryDeliveryJournal(
+        app.state.session,
+        spool,
+        clock=lambda: datetime(2030, 1, 1, 12, 2, tzinfo=UTC),
+    )
+    transport = _FailingTransport("revoked")
+    marked = []
+    worker = TelemetryDeliveryWorker(
+        journal,
+        _delivery_identity,
+        lambda credential_id, revision: marked.append((credential_id, revision)) or True,
+        transport,
+        owner="worker-a",
+        clock=lambda: datetime(2030, 1, 1, 12, 2, tzinfo=UTC),
+    )
+
+    assert worker.run_once() == "revoked"
+    assert worker.run_once() == "identity_ineligible"
+    assert len(transport.requests) == 1
+    assert marked == [(_CREDENTIAL_ID, 7)]
+
+
+def test_delivery_worker_late_fenced_401_does_not_block_newer_revision(tmp_path) -> None:
+    from one_os_addon.telemetry_delivery import TelemetryDeliveryJournal
+
+    app, spool = _pending_sample(tmp_path, "delivery-worker-stale-revocation.db")
+    current = [datetime(2030, 1, 1, 12, 2, tzinfo=UTC)]
+    journal = TelemetryDeliveryJournal(app.state.session, spool, clock=lambda: current[0])
+    transport = _FailingTransport("revoked")
+    identity = _delivery_identity()
+    fenced = []
+
+    def stale_revocation(credential_id: str, revision: int) -> bool:
+        fenced.append((credential_id, revision))
+        identity["revision"] = revision + 1
+        return False
+
+    worker = TelemetryDeliveryWorker(
+        journal,
+        lambda: identity.copy(),
+        stale_revocation,
+        transport,
+        owner="worker-a",
+        base_backoff=5,
+        max_backoff=5,
+        clock=lambda: current[0],
+    )
+
+    assert worker.run_once() == "revocation_unconfirmed"
+    current[0] += timedelta(seconds=6)
+    assert worker.run_once() == "revocation_unconfirmed"
+    assert len(transport.requests) == 2
+    assert fenced == [(_CREDENTIAL_ID, 7), (_CREDENTIAL_ID, 8)]
+    assert worker._blocked_identity is None
+
+
+def test_immutable_conflict_is_quarantined_once_and_does_not_block_later_batch(tmp_path) -> None:
+    from one_os_addon.telemetry_delivery import TelemetryDeliveryJournal
+
+    app, spool = _pending_sample(tmp_path, "delivery-worker-quarantine.db")
+    second_batch_id = "55555555-5555-4555-8555-555555555555"
+    with app.state.session() as session:
+        first = session.get(TelemetryBatch, _BATCH_ID)
+        assert first is not None
+        second_document = parse_telemetry_batch(first.request_bytes).document.copy()
+        second_document["batchId"] = second_batch_id
+        second_bytes = canonical_json(second_document)
+        parsed_second = parse_telemetry_batch(second_bytes)
+        session.add(
+            TelemetryBatch(
+                batch_id=second_batch_id,
+                installation_id=first.installation_id,
+                credential_id=first.credential_id,
+                payload_sha256=first.payload_sha256,
+                request_sha256=parsed_second.request_sha256,
+                request_bytes=second_bytes,
+                sample_count=first.sample_count,
+                quality_event_count=first.quality_event_count,
+                gap_count=first.gap_count,
+                status="pending",
+                lease_owner=None,
+                lease_until=None,
+                attempt_count=0,
+                last_attempt_at=None,
+                next_attempt_at=None,
+                ack_bytes=None,
+                ingest_cursor=None,
+                acked_at=None,
+                created_at=datetime(2030, 1, 1, 12, 2, 1, tzinfo=UTC),
+            )
+        )
+        session.commit()
+    journal = TelemetryDeliveryJournal(
+        app.state.session,
+        spool,
+        clock=lambda: datetime(2030, 1, 1, 12, 2, 2, tzinfo=UTC),
+    )
+    transport = _ConflictThenAcceptTransport()
+    worker = _delivery_worker(journal, transport)
+
+    assert worker.run_once() == "immutable_conflict"
+    restarted_worker = _delivery_worker(journal, transport)
+    assert restarted_worker.run_once() == "acked"
+    assert len(transport.requests) == 2
+    assert parse_telemetry_batch(transport.requests[0]).document["batchId"] == _BATCH_ID
+    assert parse_telemetry_batch(transport.requests[1]).document["batchId"] == second_batch_id
+    with app.state.session() as session:
+        first = session.get(TelemetryBatch, _BATCH_ID)
+        second = session.get(TelemetryBatch, second_batch_id)
+        assert first is not None and first.status == "quarantined"
+        assert first.terminal_reason == "immutable_conflict"
+        assert first.quarantined_at == datetime(2030, 1, 1, 12, 2, 2)
+        assert first.lease_owner is None and first.lease_until is None
+        assert session.query(TelemetryBatchRecord).filter_by(batch_id=_BATCH_ID).count() == 1
+        assert session.query(TelemetryOutboxRecord).count() == 1
+        assert second is not None and second.status == "acked"
+
+
+def test_quarantine_is_reason_owner_and_deadline_fenced(tmp_path) -> None:
+    from one_os_addon.telemetry_delivery import (
+        TelemetryDeliveryError,
+        TelemetryDeliveryJournal,
+    )
+
+    app, spool = _pending_sample(tmp_path, "delivery-quarantine-fencing.db")
+    leased = TelemetryDeliveryJournal(
+        app.state.session,
+        spool,
+        clock=lambda: datetime(2030, 1, 1, 12, 2, tzinfo=UTC),
+    ).acquire(owner="worker-a", lease_for=timedelta(seconds=30))
+    assert leased is not None
+    active = TelemetryDeliveryJournal(
+        app.state.session,
+        spool,
+        clock=lambda: datetime(2030, 1, 1, 12, 2, 29, tzinfo=UTC),
+    )
+    with pytest.raises(TelemetryDeliveryError, match="invalid_terminal_reason"):
+        active.quarantine(batch_id=_BATCH_ID, owner="worker-a", reason="operator_reset")
+    with pytest.raises(TelemetryDeliveryError, match="lease_not_owned"):
+        active.quarantine(batch_id=_BATCH_ID, owner="worker-stale", reason="immutable_conflict")
+    expired = TelemetryDeliveryJournal(
+        app.state.session,
+        spool,
+        clock=lambda: datetime(2030, 1, 1, 12, 2, 30, tzinfo=UTC),
+    )
+    with pytest.raises(TelemetryDeliveryError, match="lease_expired"):
+        expired.quarantine(batch_id=_BATCH_ID, owner="worker-a", reason="immutable_conflict")
+    with app.state.session() as session:
+        batch = session.get(TelemetryBatch, _BATCH_ID)
+        assert batch is not None and batch.status == "leased"
+        assert batch.terminal_reason is None and batch.quarantined_at is None
+
+
+def test_quarantine_migration_refuses_downgrade_that_would_discard_terminal_batch(
+    tmp_path,
+) -> None:
+    from alembic import command
+    from alembic.config import Config
+    from one_os_addon.telemetry_delivery import TelemetryDeliveryJournal
+
+    database_name = "delivery-quarantine-migration.db"
+    app, spool = _pending_sample(tmp_path, database_name)
+    journal = TelemetryDeliveryJournal(
+        app.state.session,
+        spool,
+        clock=lambda: datetime(2030, 1, 1, 12, 2, tzinfo=UTC),
+    )
+    assert journal.acquire(owner="worker-a", lease_for=timedelta(seconds=30)) is not None
+    journal.quarantine(batch_id=_BATCH_ID, owner="worker-a", reason="immutable_conflict")
+    app.state.engine.dispose()
+    config = Config("one_os_edge/alembic.ini")
+    config.set_main_option("sqlalchemy.url", f"sqlite:///{tmp_path / database_name}")
+    config.attributes["explicit_database_url"] = True
+
+    with pytest.raises(RuntimeError, match="refusing to discard quarantined telemetry batches"):
+        command.downgrade(config, "0011")
+
+
+def test_response_loss_retries_byte_identical_batch_and_commits_later_ack(tmp_path) -> None:
+    from one_os_addon.telemetry_delivery import TelemetryDeliveryJournal
+
+    app, spool = _pending_sample(tmp_path, "delivery-worker-response-loss.db")
+    first_journal = TelemetryDeliveryJournal(
+        app.state.session,
+        spool,
+        clock=lambda: datetime(2030, 1, 1, 12, 2, tzinfo=UTC),
+    )
+    lost = _FailingTransport()
+    assert _delivery_worker(first_journal, lost).run_once() == "unreachable"
+
+    retry_journal = TelemetryDeliveryJournal(
+        app.state.session,
+        spool,
+        clock=lambda: datetime(2030, 1, 1, 12, 2, 5, tzinfo=UTC),
+    )
+    accepted = _AcceptingTransport()
+    retry_worker = TelemetryDeliveryWorker(
+        retry_journal,
+        _delivery_identity,
+        lambda _credential_id, _revision: True,
+        accepted,
+        owner="worker-b",
+        clock=lambda: datetime(2030, 1, 1, 12, 2, 5, tzinfo=UTC),
+    )
+
+    assert retry_worker.run_once() == "acked"
+    assert accepted.requests[0][0] == lost.requests[0][0]
+    with app.state.session() as session:
+        batch = session.get(TelemetryBatch, _BATCH_ID)
+        assert batch is not None and batch.status == "acked" and batch.attempt_count == 2

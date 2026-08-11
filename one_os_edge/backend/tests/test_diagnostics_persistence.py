@@ -93,8 +93,39 @@ def test_v2_to_v3_migration_backfills_ontology_provenance_and_downgrades(tmp_pat
 
 
 def test_diagnostics_is_allowlist_only_and_audit_is_safe(client, auth, fake_ha):
+    from datetime import datetime
+
+    from one_os_addon.models import TelemetryBatch
+
     fake_ha.states["sensor.room_temperature"]["state"] = "CANARY_SECRET_STATE"
     client.post("/api/v1/reconcile", headers=auth)
+    with client.app.state.session() as session:
+        session.add(
+            TelemetryBatch(
+                batch_id="99999999-9999-4999-8999-999999999999",
+                installation_id="88888888-8888-4888-8888-888888888888",
+                credential_id="77777777-7777-4777-8777-777777777777",
+                payload_sha256="DO_NOT_EXPORT_PAYLOAD_HASH",
+                request_sha256="DO_NOT_EXPORT_REQUEST_HASH",
+                request_bytes=b"DO_NOT_EXPORT_TELEMETRY_BYTES",
+                sample_count=1,
+                quality_event_count=0,
+                gap_count=0,
+                status="quarantined",
+                lease_owner=None,
+                lease_until=None,
+                attempt_count=1,
+                last_attempt_at=datetime(2030, 1, 1, 12, 0),
+                next_attempt_at=None,
+                ack_bytes=None,
+                ingest_cursor=None,
+                acked_at=None,
+                terminal_reason="immutable_conflict",
+                quarantined_at=datetime(2030, 1, 1, 12, 1),
+                created_at=datetime(2030, 1, 1, 12, 0),
+            )
+        )
+        session.commit()
     diag = client.get("/api/v1/diagnostics/export", headers=auth)
     assert set(diag.json()) == {
         "schemaVersion",
@@ -106,9 +137,22 @@ def test_diagnostics_is_allowlist_only_and_audit_is_safe(client, auth, fake_ha):
         "lastSync",
         "counts",
         "storage",
+        "telemetryDelivery",
     }
     assert diag.json()["softwareVersion"] == "0.3.0"
+    assert diag.json()["databaseRevision"] == "0012"
+    assert diag.json()["telemetryDelivery"] == {
+        "pending": 0,
+        "leased": 0,
+        "acked": 0,
+        "quarantined": 1,
+        "oldestQuarantine": {
+            "at": "2030-01-01T12:01:00",
+            "reason": "immutable_conflict",
+        },
+    }
     assert "CANARY" not in diag.text and "sensor.room_temperature" not in diag.text
+    assert "99999999" not in diag.text and "DO_NOT_EXPORT" not in diag.text
     assert all(
         set(row) <= {"actorId", "at", "action", "objectId", "revision", "fields"}
         for row in client.get("/api/v1/audit", headers=auth).json()
@@ -346,7 +390,7 @@ def test_cold_backup_restore_preserves_complete_commissioning_state(tmp_path, fa
         assert not (restored_identity / "identity-private-key.pem").exists()
     restored_app.state.engine.dispose()
     with closing(sqlite3.connect(restored)) as connection:
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0011",)
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0012",)
 
 
 def test_app_database_is_migrated_to_alembic_head(tmp_path, fake_ha):
@@ -359,7 +403,7 @@ def test_app_database_is_migrated_to_alembic_head(tmp_path, fake_ha):
     app = create_app(database_url=f"sqlite:///{database}", ha_client=fake_ha)
     app.state.engine.dispose()
     with closing(sqlite3.connect(database)) as connection:
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0011",)
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0012",)
 
 
 def test_explicit_database_url_wins_over_ambient_database_url(tmp_path, fake_ha, monkeypatch):
@@ -376,7 +420,7 @@ def test_explicit_database_url_wins_over_ambient_database_url(tmp_path, fake_ha,
     app.state.engine.dispose()
 
     with closing(sqlite3.connect(explicit)) as connection:
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0011",)
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0012",)
         assert connection.execute("SELECT COUNT(*) FROM edge_identity").fetchone() == (1,)
     assert not ambient.exists()
 

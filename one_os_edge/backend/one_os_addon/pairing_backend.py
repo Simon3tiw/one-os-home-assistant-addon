@@ -537,6 +537,77 @@ class PairingBackend:
         certificate, chain = self.store.read_identity_credential()
         return certificate + chain, self.store.identity_private_pem()
 
+    @_serialized
+    def active_transport_identity(self) -> dict[str, Any]:
+        if self.state.get("status") != "paired":
+            raise PairingError("device_not_paired")
+        certificate, chain = self.store.read_identity_credential()
+        private_key = self.store.load_identity()
+        expected_digest = self.state.get("certificateSha256")
+        expected_spki_digest = self.state.get("activeSpkiSha256")
+        if (
+            not all(
+                isinstance(self.state.get(field), str)
+                for field in (
+                    "installationId",
+                    "tenantId",
+                    "siteId",
+                    "certificateNotAfter",
+                )
+            )
+            or not isinstance(expected_digest, str)
+            or not isinstance(expected_spki_digest, str)
+        ):
+            raise PairingError("active_identity_drift")
+        leaf = validate_issued_credential(
+            private_key,
+            certificate,
+            chain,
+            expected_digest,
+            self.state["installationId"],
+            self.state["tenantId"],
+            self.state["siteId"],
+            self.clock(),
+        )
+        leaf_spki = leaf.public_key().public_bytes(
+            serialization.Encoding.DER,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        if (
+            not secrets.compare_digest(
+                _b64u(hashlib.sha256(leaf_spki).digest()), expected_spki_digest
+            )
+            or _parse_time(self.state["certificateNotAfter"]) != leaf.not_valid_after_utc
+        ):
+            raise PairingError("active_identity_drift")
+        private_key_pem = private_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        ).decode("ascii")
+        return {
+            "status": "paired",
+            "installationId": self.state.get("installationId"),
+            "credentialId": self.state.get("credentialId"),
+            "certificateSha256": expected_digest,
+            "certificateNotAfter": self.state.get("certificateNotAfter"),
+            "activeSpkiSha256": self.state.get("activeSpkiSha256"),
+            "revision": self.state.get("revision"),
+            "certificatePem": certificate + chain,
+            "privateKeyPem": private_key_pem,
+        }
+
+    @_serialized
+    def mark_transport_revoked(self, credential_id: str, revision: int) -> bool:
+        if (
+            self.state.get("status") != "paired"
+            or self.state.get("credentialId") != credential_id
+            or self.state.get("revision") != revision
+        ):
+            return False
+        self._mark_device_revoked()
+        return True
+
     def _assert_device_status(self, response: dict[str, Any]) -> None:
         expected = {
             "installationId": self.state.get("installationId"),
@@ -758,11 +829,18 @@ class PairingBackend:
                 raise PairingError("renewal_promotion_incomplete") from error
         else:
             self.store.promote_renewal()
+        certificate, _chain = self.store.read_identity_credential()
+        active_leaf = x509.load_pem_x509_certificate(certificate.encode("ascii"))
+        active_spki = active_leaf.public_key().public_bytes(
+            serialization.Encoding.DER,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
         response = record["ackResponse"]
         self._update_state(
             status="paired",
             credentialId=ack["newCredentialId"],
             certificateSha256=ack["newCertificateSha256"],
+            activeSpkiSha256=_b64u(hashlib.sha256(active_spki).digest()),
             certificateNotAfter=record["certificateNotAfter"],
             installationRevision=response["installationRevision"],
             renewalStatus=None,

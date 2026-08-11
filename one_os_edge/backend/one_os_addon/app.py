@@ -7,7 +7,7 @@ import platform
 import re
 import secrets
 import time
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import UTC
 from pathlib import Path
 from typing import Any, Literal
@@ -47,6 +47,7 @@ from .models import (
     Space,
     Structure,
     SyncRun,
+    TelemetryBatch,
     now,
     uid,
 )
@@ -56,7 +57,10 @@ from .pairing_storage import IdentityStore
 from .pairing_worker import PairingWorker
 from .reconciliation import infer_ontology_class, reconcile
 from .sync import SyncCoordinator
+from .telemetry_delivery import TelemetryDeliveryJournal
 from .telemetry_outbox import TelemetryOutbox
+from .telemetry_transport import TelemetryDestinationSnapshot, TelemetryUploadTransport
+from .telemetry_worker import TelemetryDeliveryWorker
 from .version import RELEASE_VERSION
 
 
@@ -487,7 +491,10 @@ def create_app(
     start_pairing_worker=True,
     telemetry_enabled=False,
     telemetry_spool_dir=None,
+    telemetry_worker=None,
 ):
+    if telemetry_worker is not None and not telemetry_enabled:
+        raise ValueError("telemetry worker requires telemetry feature flag")
     app = FastAPI(
         title="ONE.OS commissioning API", version="1.0.0", root_path=os.getenv("INGRESS_PATH", "")
     )
@@ -538,14 +545,31 @@ def create_app(
     app.state.csrf_ttl_seconds = csrf_ttl_seconds
     app.state.engine = engine
     app.state.sync = None
+    telemetry_spool = Path(
+        telemetry_spool_dir or os.getenv("TELEMETRY_SPOOL_DIR", "/data/telemetry-outbox")
+    )
     app.state.telemetry_outbox = (
         TelemetryOutbox(
             app.state.session,
-            Path(telemetry_spool_dir or os.getenv("TELEMETRY_SPOOL_DIR", "/data/telemetry-outbox")),
+            telemetry_spool,
         )
         if telemetry_enabled
         else None
     )
+    telemetry_destination = TelemetryDestinationSnapshot()
+    with app.state.session() as destination_session:
+        configured_destination = destination_session.get(CentralDestination, 1)
+        if configured_destination is not None:
+            telemetry_destination.update(
+                configured_destination.revision,
+                configured_destination.origin,
+                configured_destination.certificate_fingerprint,
+            )
+    app.state.telemetry_destination = telemetry_destination
+    app.state.telemetry_delivery = (
+        TelemetryDeliveryJournal(app.state.session, telemetry_spool) if telemetry_enabled else None
+    )
+    app.state.telemetry_worker = telemetry_worker if telemetry_enabled else None
     app.state.telemetry_recovery = None
     app.state.destination_tester = destination_tester or test_pinned_discovery
 
@@ -565,17 +589,28 @@ def create_app(
             )
             identity_store = IdentityStore(app.state.identity_dir)
             pairing_repository = PairingRepository(app.state.session)
-            app.state.pairing = PairingBackend(
+            pairing_runtime = PairingBackend(
                 identity_store,
                 central_pairing,
                 repository=pairing_repository,
             )
+            app.state.pairing = pairing_runtime
             app.state.configuration_sync = ConfigurationSnapshotSync(
                 app.state.configuration_snapshot_repository,
                 pairing_repository.load,
                 identity_store,
                 central_pairing,
             )
+            if telemetry_enabled and app.state.telemetry_worker is None:
+                telemetry_transport = TelemetryUploadTransport(telemetry_destination)
+                telemetry_delivery = app.state.telemetry_delivery
+                assert telemetry_delivery is not None
+                app.state.telemetry_worker = TelemetryDeliveryWorker(
+                    telemetry_delivery,
+                    pairing_runtime.active_transport_identity,
+                    pairing_runtime.mark_transport_revoked,
+                    telemetry_transport,
+                )
             if start_pairing_worker:
                 app.state.pairing_worker = PairingWorker(
                     app.state.pairing,
@@ -586,26 +621,26 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app):
-        if app.state.telemetry_outbox:
-            app.state.telemetry_recovery = app.state.telemetry_outbox.recover()
-        if app.state.pairing_worker:
-            await app.state.pairing_worker.start()
-        if start_background_sync:
-            app.state.sync = SyncCoordinator(
-                app.state.ha,
-                app.state.session,
-                full_interval=sync_interval,
-                telemetry_outbox=app.state.telemetry_outbox,
-            )
-            await app.state.sync.start()
-        try:
-            yield
-        finally:
+        async with AsyncExitStack() as cleanup:
+            cleanup.callback(engine.dispose)
+            if app.state.telemetry_outbox:
+                app.state.telemetry_recovery = app.state.telemetry_outbox.recover()
             if app.state.pairing_worker:
-                await app.state.pairing_worker.stop()
-            if app.state.sync:
-                await app.state.sync.stop()
-            engine.dispose()
+                cleanup.push_async_callback(app.state.pairing_worker.stop)
+                await app.state.pairing_worker.start()
+            if app.state.telemetry_worker:
+                cleanup.push_async_callback(app.state.telemetry_worker.stop)
+                await app.state.telemetry_worker.start()
+            if start_background_sync:
+                app.state.sync = SyncCoordinator(
+                    app.state.ha,
+                    app.state.session,
+                    full_interval=sync_interval,
+                    telemetry_outbox=app.state.telemetry_outbox,
+                )
+                cleanup.push_async_callback(app.state.sync.stop)
+                await app.state.sync.start()
+            yield
 
     app.router.lifespan_context = lifespan
 
@@ -838,6 +873,10 @@ def create_app(
                 s.rollback()
                 raise HTTPException(409, detail={"code": "revision_conflict"}) from error
             destination = s.get(CentralDestination, 1)
+            assert destination is not None
+            app.state.telemetry_destination.update(
+                next_revision, body.origin, body.certificateFingerprint
+            )
             return central_destination_json(destination)
 
     @app.post("/api/v1/central-destination/test")
@@ -1460,6 +1499,20 @@ def create_app(
             data = inventory(s)
             site = s.scalar(select(Site))
             last = s.scalar(select(SyncRun).order_by(SyncRun.at.desc()))
+            delivery_counts = {
+                status: count
+                for status, count in s.execute(
+                    select(TelemetryBatch.status, func.count())
+                    .group_by(TelemetryBatch.status)
+                    .order_by(TelemetryBatch.status)
+                )
+            }
+            oldest_quarantine = s.scalar(
+                select(TelemetryBatch)
+                .where(TelemetryBatch.status == "quarantined")
+                .order_by(TelemetryBatch.quarantined_at, TelemetryBatch.batch_id)
+                .limit(1)
+            )
             return {
                 "schemaVersion": "1.0",
                 "softwareVersion": RELEASE_VERSION,
@@ -1467,7 +1520,7 @@ def create_app(
                 "installationHash": hashlib.sha256(
                     (site.installation_id if site else "uninitialized").encode()
                 ).hexdigest(),
-                "databaseRevision": "0011",
+                "databaseRevision": "0012",
                 "connectorPresence": app.state.ha.connector_presence,
                 "lastSync": {
                     "at": last.at.isoformat() if last else None,
@@ -1477,6 +1530,21 @@ def create_app(
                 "storage": {
                     "auditRecords": s.scalar(select(func.count()).select_from(Audit)),
                     "configurationBytes": 0,
+                },
+                "telemetryDelivery": {
+                    "pending": delivery_counts.get("pending", 0),
+                    "leased": delivery_counts.get("leased", 0),
+                    "acked": delivery_counts.get("acked", 0),
+                    "quarantined": delivery_counts.get("quarantined", 0),
+                    "oldestQuarantine": (
+                        {
+                            "at": oldest_quarantine.quarantined_at.isoformat(),
+                            "reason": oldest_quarantine.terminal_reason,
+                        }
+                        if oldest_quarantine is not None
+                        and oldest_quarantine.quarantined_at is not None
+                        else None
+                    ),
                 },
             }
 

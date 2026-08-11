@@ -403,7 +403,7 @@ class TelemetryBatch(Base):
             name="ck_telemetry_batch_request_bytes",
         ),
         CheckConstraint(
-            "status IN ('pending', 'leased', 'acked')",
+            "status IN ('pending', 'leased', 'acked', 'quarantined')",
             name="ck_telemetry_batch_status",
         ),
         CheckConstraint(
@@ -426,6 +426,12 @@ class TelemetryBatch(Base):
             "(ingest_cursor >= 0 AND ingest_cursor <= 9223372036854775807)",
             name="ck_telemetry_batch_ingest_cursor",
         ),
+        CheckConstraint(
+            "(status = 'quarantined' AND terminal_reason = 'immutable_conflict' AND "
+            "quarantined_at IS NOT NULL) OR (status != 'quarantined' AND "
+            "terminal_reason IS NULL AND quarantined_at IS NULL)",
+            name="ck_telemetry_batch_quarantine",
+        ),
         Index("ix_telemetry_batches_delivery", "status", "next_attempt_at", "created_at"),
     )
     batch_id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -446,6 +452,8 @@ class TelemetryBatch(Base):
     ack_bytes: Mapped[bytes | None] = mapped_column(LargeBinary)
     ingest_cursor: Mapped[int | None] = mapped_column(Integer)
     acked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    terminal_reason: Mapped[str | None] = mapped_column(String(32))
+    quarantined_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=now
     )

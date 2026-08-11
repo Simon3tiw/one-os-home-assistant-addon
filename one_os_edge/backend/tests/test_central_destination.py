@@ -22,6 +22,8 @@ FINGERPRINT = "AA:" * 31 + "AA"
 
 
 def test_destination_is_unconfigured_without_secrets(client):
+    with pytest.raises(LookupError):
+        client.app.state.telemetry_destination.read()
     response = client.get("/api/v1/central-destination", headers={"X-Remote-User-Id": "admin-1"})
 
     assert response.status_code == 200
@@ -52,6 +54,7 @@ def test_put_persists_normalized_revision_safe_destination(client, auth):
     assert body["certificateFingerprint"] == "aa" * 32
     assert body["configuredAt"].endswith("+00:00")
     assert body["status"] == "configured"
+    assert client.app.state.telemetry_destination.read() == (ORIGIN, "aa" * 32)
     assert (
         client.put(
             "/api/v1/central-destination",
@@ -60,6 +63,7 @@ def test_put_persists_normalized_revision_safe_destination(client, auth):
         ).status_code
         == 409
     )
+    assert client.app.state.telemetry_destination.read() == (ORIGIN, "aa" * 32)
 
 
 def test_concurrent_initial_destination_create_has_exactly_one_winner(client, auth):
@@ -99,6 +103,56 @@ def test_concurrent_destination_update_has_exactly_one_winner(client, auth):
 
     assert sorted(statuses) == [200, 409]
     assert client.get("/api/v1/central-destination", headers=auth).json()["revision"] == 2
+
+
+def test_late_older_destination_publication_cannot_regress_runtime_snapshot(
+    client, auth, monkeypatch
+):
+    snapshot = client.app.state.telemetry_destination
+    snapshot_type = type(snapshot)
+    original_update = snapshot_type.update
+    revision_one_waiting = threading.Event()
+    release_revision_one = threading.Event()
+
+    def delayed_update(self, revision, origin, fingerprint):
+        if revision == 1:
+            revision_one_waiting.set()
+            assert release_revision_one.wait(timeout=5)
+        return original_update(self, revision, origin, fingerprint)
+
+    monkeypatch.setattr(snapshot_type, "update", delayed_update)
+
+    def publish_revision_one():
+        return client.put(
+            "/api/v1/central-destination",
+            headers=auth,
+            json={
+                "revision": 0,
+                "origin": "https://a.example",
+                "certificateFingerprint": "11" * 32,
+            },
+        )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        first = executor.submit(publish_revision_one)
+        assert revision_one_waiting.wait(timeout=5)
+        second = client.put(
+            "/api/v1/central-destination",
+            headers=auth,
+            json={
+                "revision": 1,
+                "origin": "https://b.example",
+                "certificateFingerprint": "22" * 32,
+            },
+        )
+        assert second.status_code == 200
+        release_revision_one.set()
+        assert first.result(timeout=5).status_code == 200
+
+    durable = client.get("/api/v1/central-destination", headers=auth).json()
+    assert durable["revision"] == 2
+    assert durable["origin"] == "https://b.example"
+    assert snapshot.read_versioned() == (2, "https://b.example", "22" * 32)
 
 
 @pytest.mark.parametrize(

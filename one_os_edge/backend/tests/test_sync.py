@@ -236,3 +236,236 @@ def test_telemetry_recovery_failure_blocks_all_background_sync(tmp_path, monkeyp
 
     assert started == []
     assert app.state.sync is None
+
+
+def test_telemetry_delivery_worker_starts_after_recovery_and_stops_on_shutdown(
+    tmp_path, monkeypatch
+):
+    from one_os_addon.telemetry_outbox import TelemetryOutbox
+
+    order = []
+    original_recover = TelemetryOutbox.recover
+    original_sync_stop = SyncCoordinator.stop
+
+    def observed_recover(self):
+        order.append("recover")
+        return original_recover(self)
+
+    async def observed_sync_stop(self):
+        order.append("sync-stop")
+        await original_sync_stop(self)
+
+    class Worker:
+        async def start(self):
+            order.append("delivery-start")
+
+        async def stop(self):
+            order.append("delivery-stop")
+
+    monkeypatch.setattr(TelemetryOutbox, "recover", observed_recover)
+    monkeypatch.setattr(SyncCoordinator, "stop", observed_sync_stop)
+    worker = Worker()
+    app = create_app(
+        database_url=f"sqlite:///{tmp_path / 'telemetry-worker-lifespan.db'}",
+        ha_client=streaming_fake(),
+        pairing_backend=False,
+        telemetry_enabled=True,
+        telemetry_spool_dir=tmp_path / "telemetry-outbox",
+        telemetry_worker=worker,
+        start_background_sync=True,
+    )
+
+    with TestClient(app):
+        assert order == ["recover", "delivery-start"]
+        assert app.state.telemetry_worker is worker
+
+    assert order == ["recover", "delivery-start", "sync-stop", "delivery-stop"]
+
+
+def test_real_pairing_boundary_auto_composes_delivery_worker_only_when_enabled(tmp_path):
+    from one_os_addon.telemetry_worker import TelemetryDeliveryWorker
+
+    enabled = create_app(
+        database_url=f"sqlite:///{tmp_path / 'telemetry-auto-worker.db'}",
+        ha_client=streaming_fake(),
+        identity_dir=tmp_path / "identity-enabled",
+        start_pairing_worker=False,
+        telemetry_enabled=True,
+        telemetry_spool_dir=tmp_path / "telemetry-enabled",
+    )
+    disabled = create_app(
+        database_url=f"sqlite:///{tmp_path / 'telemetry-no-worker.db'}",
+        ha_client=streaming_fake(),
+        identity_dir=tmp_path / "identity-disabled",
+        start_pairing_worker=False,
+        telemetry_enabled=False,
+    )
+
+    with TestClient(enabled):
+        assert isinstance(enabled.state.telemetry_worker, TelemetryDeliveryWorker)
+        assert enabled.state.telemetry_worker._task is not None
+    assert enabled.state.telemetry_worker._task is None
+
+    with TestClient(disabled):
+        assert disabled.state.telemetry_worker is None
+        assert disabled.state.telemetry_delivery is None
+
+
+def test_injected_delivery_worker_requires_enabled_featureflag(tmp_path):
+    with pytest.raises(ValueError, match="requires telemetry feature flag"):
+        create_app(
+            database_url=f"sqlite:///{tmp_path / 'disabled-injected-worker.db'}",
+            ha_client=streaming_fake(),
+            pairing_backend=False,
+            telemetry_enabled=False,
+            telemetry_worker=object(),
+        )
+
+
+def test_lifespan_cleanup_continues_after_stop_callback_failure(tmp_path, monkeypatch):
+    order = []
+
+    class Worker:
+        def __init__(self, name):
+            self.name = name
+
+        async def start(self):
+            order.append(f"{self.name}-start")
+
+        async def stop(self):
+            order.append(f"{self.name}-stop")
+
+    async def sync_start(_self):
+        order.append("sync-start")
+
+    async def sync_stop(_self):
+        order.append("sync-stop")
+        raise RuntimeError("stop failed")
+
+    monkeypatch.setattr(SyncCoordinator, "start", sync_start)
+    monkeypatch.setattr(SyncCoordinator, "stop", sync_stop)
+    app = create_app(
+        database_url=f"sqlite:///{tmp_path / 'cleanup-stop-failure.db'}",
+        ha_client=streaming_fake(),
+        pairing_backend=False,
+        telemetry_enabled=True,
+        telemetry_spool_dir=tmp_path / "cleanup-stop-failure-spool",
+        telemetry_worker=Worker("telemetry"),
+        start_background_sync=True,
+    )
+    app.state.pairing_worker = Worker("pairing")
+    original_dispose = app.state.engine.dispose
+
+    def dispose():
+        order.append("dispose")
+        original_dispose()
+
+    monkeypatch.setattr(app.state.engine, "dispose", dispose)
+
+    with pytest.raises(RuntimeError, match="stop failed"):
+        with TestClient(app):
+            pass
+
+    assert order == [
+        "pairing-start",
+        "telemetry-start",
+        "sync-start",
+        "sync-stop",
+        "telemetry-stop",
+        "pairing-stop",
+        "dispose",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        ("recovery", ["recover", "dispose"]),
+        ("pairing", ["recover", "pairing-start", "pairing-stop", "dispose"]),
+        (
+            "telemetry",
+            [
+                "recover",
+                "pairing-start",
+                "telemetry-start",
+                "telemetry-stop",
+                "pairing-stop",
+                "dispose",
+            ],
+        ),
+        (
+            "sync",
+            [
+                "recover",
+                "pairing-start",
+                "telemetry-start",
+                "sync-start",
+                "sync-stop",
+                "telemetry-stop",
+                "pairing-stop",
+                "dispose",
+            ],
+        ),
+    ],
+)
+def test_failed_lifespan_startup_rolls_back_attempted_workers_in_reverse_order(
+    tmp_path, monkeypatch, failure, expected
+):
+    from one_os_addon.telemetry_outbox import TelemetryOutbox
+
+    order = []
+
+    class Worker:
+        def __init__(self, name):
+            self.name = name
+
+        async def start(self):
+            order.append(f"{self.name}-start")
+            if failure == self.name:
+                raise RuntimeError("startup failed")
+
+        async def stop(self):
+            order.append(f"{self.name}-stop")
+
+    original_recover = TelemetryOutbox.recover
+
+    def recover(self):
+        order.append("recover")
+        if failure == "recovery":
+            raise RuntimeError("startup failed")
+        return original_recover(self)
+
+    async def sync_start(_self):
+        order.append("sync-start")
+        if failure == "sync":
+            raise RuntimeError("startup failed")
+
+    async def sync_stop(_self):
+        order.append("sync-stop")
+
+    monkeypatch.setattr(TelemetryOutbox, "recover", recover)
+    monkeypatch.setattr(SyncCoordinator, "start", sync_start)
+    monkeypatch.setattr(SyncCoordinator, "stop", sync_stop)
+    app = create_app(
+        database_url=f"sqlite:///{tmp_path / f'lifespan-{failure}.db'}",
+        ha_client=streaming_fake(),
+        pairing_backend=False,
+        telemetry_enabled=True,
+        telemetry_spool_dir=tmp_path / f"spool-{failure}",
+        telemetry_worker=Worker("telemetry"),
+        start_background_sync=True,
+    )
+    app.state.pairing_worker = Worker("pairing")
+    original_dispose = app.state.engine.dispose
+
+    def dispose():
+        order.append("dispose")
+        original_dispose()
+
+    monkeypatch.setattr(app.state.engine, "dispose", dispose)
+
+    with pytest.raises(RuntimeError, match="startup failed"):
+        with TestClient(app):
+            pass
+
+    assert order == expected

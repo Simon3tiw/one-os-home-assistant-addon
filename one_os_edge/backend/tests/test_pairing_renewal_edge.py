@@ -203,15 +203,21 @@ def paired_backend(tmp_path):
     leaf, pem, chain = issue(key.public_key(), installation_id)
     store.write_identity_credential(pem, chain)
     digest = b64u(hashlib.sha256(leaf.public_bytes(serialization.Encoding.DER)).digest())
+    spki = key.public_key().public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
     state = {
         "installationId": installation_id,
         "status": "paired",
         "credentialId": old_id,
         "certificateSha256": digest,
+        "activeSpkiSha256": b64u(hashlib.sha256(spki).digest()),
         "certificateNotAfter": leaf.not_valid_after_utc.isoformat(),
         "installationRevision": 11,
         "tenantId": "tenant-1",
         "siteId": "site-1",
+        "revision": 1,
     }
     central = RenewalCentral(store, installation_id, old_id, digest)
     return PairingBackend(store, central, state), central
@@ -219,6 +225,7 @@ def paired_backend(tmp_path):
 
 def test_renewal_happy_path_is_restart_safe_and_promotes_only_after_ack(tmp_path) -> None:
     backend, central = paired_backend(tmp_path)
+    old_spki = backend.state["activeSpkiSha256"]
     backend.maintain_device()
     first = backend.store.read_renewal()
     assert first["startRequest"] == central.request_body
@@ -235,6 +242,13 @@ def test_renewal_happy_path_is_restart_safe_and_promotes_only_after_ack(tmp_path
     assert restarted.status()["credentialId"] == central.new_id
     assert restarted.store.read_renewal() is None
     assert restarted.store.load_identity().private_numbers() != old_key
+    identity = restarted.active_transport_identity()
+    assert identity["credentialId"] == central.new_id
+    assert identity["activeSpkiSha256"] == restarted.state["activeSpkiSha256"]
+    assert identity["activeSpkiSha256"] != old_spki
+    assert identity["certificateSha256"] == restarted.state["certificateSha256"]
+    assert identity["certificateNotAfter"] == restarted.state["certificateNotAfter"]
+    assert identity["revision"] == restarted.state["revision"]
 
 
 @pytest.mark.parametrize(

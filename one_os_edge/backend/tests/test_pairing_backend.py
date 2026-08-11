@@ -369,6 +369,71 @@ def test_claim_secret_boundary_pending_candidate_and_mtls_ack_retry_after_restar
     assert restarted.store.read_transient() is None
 
 
+def _completed_pairing(tmp_path):
+    central = LossyCentral()
+    central.lose_registration_once = False
+    central.lose_ack_once = False
+    state = {}
+    backend = PairingBackend(IdentityStore(tmp_path / "identity"), central, state)
+    backend.start("initial", str(uuid4()))
+    central.claimed = True
+    backend.refresh()
+    central.prepare_issued(backend)
+    backend.refresh()
+    state["revision"] = 12
+    return backend, state
+
+
+def test_active_transport_identity_is_digest_and_key_bound(tmp_path, monkeypatch) -> None:
+    backend, _state = _completed_pairing(tmp_path)
+
+    snapshot = backend.active_transport_identity()
+
+    assert snapshot["status"] == "paired"
+    assert snapshot["revision"] == 12
+    assert snapshot["certificatePem"].startswith("-----BEGIN CERTIFICATE-----")
+    assert snapshot["privateKeyPem"].startswith("-----BEGIN PRIVATE KEY-----")
+    mismatched_key = ec.generate_private_key(ec.SECP256R1())
+    monkeypatch.setattr(backend.store, "load_identity", lambda: mismatched_key)
+    with pytest.raises(PairingError):
+        backend.active_transport_identity()
+
+
+def test_active_transport_identity_rejects_chain_and_spki_state_drift(
+    tmp_path, monkeypatch
+) -> None:
+    backend, state = _completed_pairing(tmp_path)
+    certificate, chain = backend.store.read_identity_credential()
+    monkeypatch.setattr(
+        backend.store,
+        "read_identity_credential",
+        lambda: (certificate, "NOT_A_CERTIFICATE_CHAIN"),
+    )
+    with pytest.raises(PairingError):
+        backend.active_transport_identity()
+
+    monkeypatch.setattr(
+        backend.store,
+        "read_identity_credential",
+        lambda: (certificate, chain),
+    )
+    state["activeSpkiSha256"] = b64u(b"x" * 32)
+    with pytest.raises(PairingError, match="active_identity_drift"):
+        backend.active_transport_identity()
+
+
+def test_transport_revocation_is_fenced_by_credential_and_revision(tmp_path) -> None:
+    backend, state = _completed_pairing(tmp_path)
+    old_credential = state["credentialId"]
+
+    assert backend.mark_transport_revoked(old_credential, 11) is False
+    assert state["status"] == "paired"
+    assert backend.mark_transport_revoked(str(uuid4()), 12) is False
+    assert state["status"] == "paired"
+    assert backend.mark_transport_revoked(old_credential, 12) is True
+    assert state["status"] == "revoked"
+
+
 def test_issued_result_response_loss_retries_without_losing_or_duplicating_candidate(
     tmp_path,
 ) -> None:
