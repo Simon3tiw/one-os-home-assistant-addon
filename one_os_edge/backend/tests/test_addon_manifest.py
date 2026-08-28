@@ -1,4 +1,6 @@
 import json
+import os
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -16,12 +18,82 @@ def test_addon_backup_excludes_private_edge_identity() -> None:
     assert "panel_admin" not in manifest  # Home Assistant defaults this to true.
     assert manifest["homeassistant_api"] is True
     assert "hassio_api" not in manifest
+    assert manifest["options"] == {
+        "telemetry_enabled": False,
+        "telemetry_authority_enabled": False,
+        "soak_probe_enabled": False,
+    }
+    assert manifest["schema"] == {
+        "telemetry_enabled": "bool",
+        "telemetry_authority_enabled": "bool",
+        "soak_probe_enabled": "bool",
+    }
     assert manifest["backup_exclude"] == [
         "identity",
         "identity/**",
         "telemetry-outbox",
         "telemetry-outbox/**",
+        "soak-probe",
+        "soak-probe/**",
     ]
+
+
+def test_manifest_has_separate_default_off_soak_probe_port() -> None:
+    manifest = yaml.safe_load(ADDON_CONFIG.read_text(encoding="utf-8"))
+    assert manifest["options"]["soak_probe_enabled"] is False
+    assert manifest["schema"]["soak_probe_enabled"] == "bool"
+    assert manifest["ports"]["9443/tcp"] is None
+    assert "9443/tcp" in manifest["ports_description"]
+
+
+def test_addon_runtime_reads_the_validated_telemetry_option() -> None:
+    run_script = (
+        ADDON_CONFIG.parent / "rootfs" / "etc" / "services.d" / "one-os" / "run"
+    ).read_text(encoding="utf-8")
+
+    assignment = (
+        'ONE_OS_TELEMETRY_ENABLED="$(python3 -m one_os_addon.addon_options /data/options.json)"'
+    )
+    assert assignment in run_script
+    assert "export ONE_OS_TELEMETRY_ENABLED" in run_script
+    assert run_script.index(assignment) < run_script.index("exec uvicorn")
+
+
+def test_addon_runtime_does_not_start_after_options_parser_failure(tmp_path: Path) -> None:
+    run_script = (
+        ADDON_CONFIG.parent / "rootfs" / "etc" / "services.d" / "one-os" / "run"
+    ).read_text(encoding="utf-8")
+    assignment = next(
+        line for line in run_script.splitlines() if line.startswith('ONE_OS_TELEMETRY_ENABLED="$(')
+    )
+    marker = tmp_path / "uvicorn-started"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_python = fake_bin / "python3"
+    fake_python.write_text("#!/bin/sh\nexit 78\n", encoding="utf-8")
+    fake_python.chmod(0o700)
+
+    completed = subprocess.run(  # noqa: S603 - fixed shell exercises startup semantics
+        [
+            "/bin/sh",
+            "-c",
+            "\n".join(
+                (
+                    "set -eu",
+                    assignment,
+                    "export ONE_OS_TELEMETRY_ENABLED",
+                    f": > {marker}",
+                )
+            ),
+        ],
+        check=False,
+        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 78
+    assert not marker.exists()
 
 
 def test_release_version_is_consistent_across_runtime_and_package_metadata() -> None:

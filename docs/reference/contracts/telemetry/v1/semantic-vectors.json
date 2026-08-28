@@ -11,7 +11,8 @@
     "duplicateSamples": 0,
     "ingestCursor": 42,
     "installationId": "00000000-0000-4000-8000-000000000002",
-    "requestSha256": "_cM5fTc8XwPcfY6LpbdQngzeX6o1s_TGJKu9oHSKPRc",
+    "installationRevision": 7,
+    "requestSha256": "ZpxPOGJppiin3SwJd4dSQkPQBNxaMOyC9hGQyl8q5EQ",
     "schemaVersion": "1.0"
   },
   "baseBatch": {
@@ -34,7 +35,8 @@
       }
     ],
     "installationId": "00000000-0000-4000-8000-000000000002",
-    "payloadSha256": "QSvc1VkyXBQvt6xbbvRbUnaF_vO4UKLfjVXZYzuuPRs",
+    "installationRevision": 7,
+    "payloadSha256": "rsblzSASU0VXCW8ms0z7dr5cBdp5Ea-917dmwiow_qc",
     "qualityEvents": [
       {
         "configVersion": 9,
@@ -76,6 +78,89 @@
       "name": "base-valid",
       "operations": [],
       "target": "batch"
+    },
+    {
+      "code": "invalid_shape",
+      "name": "installation-revision-missing",
+      "operations": [
+        {
+          "op": "delete",
+          "path": "installationRevision"
+        }
+      ],
+      "target": "batch"
+    },
+    {
+      "code": "invalid_type",
+      "name": "installation-revision-bool",
+      "operations": [
+        {
+          "op": "set",
+          "path": "installationRevision",
+          "value": true
+        }
+      ],
+      "target": "batch"
+    },
+    {
+      "code": "invalid_json_number",
+      "name": "installation-revision-float",
+      "operations": [
+        {
+          "op": "set",
+          "path": "installationRevision",
+          "value": 1.5
+        }
+      ],
+      "target": "batch"
+    },
+    {
+      "code": "invalid_type",
+      "name": "installation-revision-string",
+      "operations": [
+        {
+          "op": "set",
+          "path": "installationRevision",
+          "value": "7"
+        }
+      ],
+      "target": "batch"
+    },
+    {
+      "code": "invalid_json_number",
+      "name": "installation-revision-negative",
+      "operations": [
+        {
+          "op": "set",
+          "path": "installationRevision",
+          "value": -1
+        }
+      ],
+      "target": "batch"
+    },
+    {
+      "code": "invalid_type",
+      "name": "installation-revision-overflow",
+      "operations": [
+        {
+          "op": "set",
+          "path": "installationRevision",
+          "value": 9223372036854775808
+        }
+      ],
+      "target": "batch"
+    },
+    {
+      "code": "ack_binding_mismatch",
+      "name": "ack-installation-revision-mismatch",
+      "operations": [
+        {
+          "op": "set",
+          "path": "installationRevision",
+          "value": 8
+        }
+      ],
+      "target": "ack"
     },
     {
       "code": "unknown_member",

@@ -2,4 +2,8 @@
 set -eu
 export DATABASE_URL="sqlite:////data/commissioning.db"
 export INGRESS_PATH="${INGRESS_ENTRY:-}"
+ONE_OS_TELEMETRY_ENABLED="$(python3 -m one_os_addon.addon_options /data/options.json)"
+ONE_OS_TELEMETRY_AUTHORITY_ENABLED="$(python3 -m one_os_addon.addon_options /data/options.json telemetry_authority_enabled)"
+export ONE_OS_TELEMETRY_ENABLED
+export ONE_OS_TELEMETRY_AUTHORITY_ENABLED
 exec uvicorn one_os_addon.app:app --host 0.0.0.0 --port 8099 --no-proxy-headers
