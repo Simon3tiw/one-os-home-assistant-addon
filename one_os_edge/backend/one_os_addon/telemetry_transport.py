@@ -13,7 +13,6 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -38,18 +37,12 @@ from .telemetry_contract_v1 import (
     TelemetryValidationError,
     parse_telemetry_batch,
 )
-from .telemetry_contract_v2 import (
-    TelemetryValidationError as TelemetryValidationErrorV2,
-)
-from .telemetry_contract_v2 import (
-    parse_telemetry_batch as parse_telemetry_batch_v2,
-)
 
 TELEMETRY_PATH = "/api/v1/edge/device/telemetry-batches"
 DEFAULT_TIMEOUT_SECONDS = 10.0
 MAX_TIMEOUT_SECONDS = 60.0
 DEFAULT_MAX_ACK_BYTES = 16 * 1024
-_MAX_ERROR_BYTES = 512
+_MAX_ERROR_BYTES = 256
 _MAX_MATERIAL_BYTES = 64 * 1024
 _WORKER_SLOTS = threading.BoundedSemaphore(2)
 _SAFE_ERRORS = frozenset(
@@ -77,14 +70,6 @@ _IMMUTABLE_CONFLICT_BODIES = frozenset(
     )
 )
 _EXPIRED_PAYLOAD_BODY = b'{"detail":"Telemetry timestamp expired"}'
-_V2_ERROR_FIELDS = {
-    "batchId",
-    "code",
-    "decidedAt",
-    "requestSha256",
-    "retryClass",
-    "schemaVersion",
-}
 
 
 class TelemetryTransportError(RuntimeError):
@@ -156,33 +141,6 @@ def _strict_json(raw: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("not object")
     return value
-
-
-def _is_exact_v2_terminal_error(
-    payload: bytes, *, expected_batch_id: str, expected_request_sha256: str
-) -> bool:
-    try:
-        document = _strict_json(payload.decode("utf-8", errors="strict"))
-        datetime.strptime(document.get("decidedAt", ""), "%Y-%m-%dT%H:%M:%SZ")
-    except (UnicodeDecodeError, ValueError, TypeError):
-        return False
-    if (
-        set(document) != _V2_ERROR_FIELDS
-        or document.get("schemaVersion") != "one-os-telemetry-error/v2"
-        or document.get("batchId") != expected_batch_id
-        or document.get("code") != "immutable_identity_conflict"
-        or document.get("requestSha256") != expected_request_sha256
-        or document.get("retryClass") != "terminal_quarantine"
-        or re.fullmatch(
-            r"[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T"
-            r"(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z",
-            document["decidedAt"],
-        )
-        is None
-    ):
-        return False
-    canonical = json.dumps(document, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    return secrets.compare_digest(canonical, payload)
 
 
 class TelemetryDestinationSnapshot:
@@ -315,9 +273,6 @@ def _read_ack(
     *,
     deadline: float,
     max_ack_bytes: int,
-    protocol: str,
-    expected_batch_id: str | None,
-    expected_request_sha256: str | None,
 ) -> bytes:
     if connection.sock:
         connection.sock.settimeout(_remaining(deadline))
@@ -338,18 +293,6 @@ def _read_ack(
             maximum_bytes=_MAX_ERROR_BYTES,
             require_no_store=False,
         )
-        if protocol == "2.0":
-            if (
-                expected_batch_id is not None
-                and expected_request_sha256 is not None
-                and _is_exact_v2_terminal_error(
-                    payload,
-                    expected_batch_id=expected_batch_id,
-                    expected_request_sha256=expected_request_sha256,
-                )
-            ):
-                raise TelemetryTransportError("immutable_conflict")
-            raise TelemetryTransportError("protocol_error")
         if payload in _IMMUTABLE_CONFLICT_BODIES:
             raise TelemetryTransportError("immutable_conflict")
         raise TelemetryTransportError("protocol_error")
@@ -361,7 +304,7 @@ def _read_ack(
             maximum_bytes=_MAX_ERROR_BYTES,
             require_no_store=False,
         )
-        if protocol == "1.0" and payload == _EXPIRED_PAYLOAD_BODY:
+        if payload == _EXPIRED_PAYLOAD_BODY:
             raise TelemetryTransportError("expired_payload")
         raise TelemetryTransportError("protocol_error")
     if response.status != 201:
@@ -384,20 +327,9 @@ def _upload_in_worker(
     *,
     timeout: float,
     max_ack_bytes: int = DEFAULT_MAX_ACK_BYTES,
-    protocol: str = "1.0",
-    authorization_mode: str = "current",
-    historical_receipt_sha256: str | None = None,
 ) -> bytes:
     if (
-        protocol not in {"1.0", "2.0"}
-        or authorization_mode not in {"current", "historical_backlog"}
-        or (authorization_mode == "historical_backlog") != (historical_receipt_sha256 is not None)
-        or (
-            historical_receipt_sha256 is not None
-            and re.fullmatch(r"[A-Za-z0-9_-]{43}", historical_receipt_sha256) is None
-        )
-        or (protocol != "2.0" and authorization_mode != "current")
-        or not math.isfinite(timeout)
+        not math.isfinite(timeout)
         or timeout <= 0
         or timeout > MAX_TIMEOUT_SECONDS
         or type(max_ack_bytes) is not int
@@ -411,11 +343,8 @@ def _upload_in_worker(
     except (TypeError, ValueError) as error:
         raise TelemetryTransportError("protocol_error") from error
     try:
-        if protocol == "2.0":
-            parsed_request = parse_telemetry_batch_v2(request_bytes)
-        else:
-            parsed_request = parse_telemetry_batch(request_bytes)
-    except (TelemetryValidationError, TelemetryValidationErrorV2) as error:
+        parse_telemetry_batch(request_bytes)
+    except TelemetryValidationError as error:
         raise TelemetryTransportError("protocol_error") from error
     certificate_pem, private_key_pem = _normalize_material(certificate_pem, private_key_pem)
     deadline = time.monotonic() + timeout
@@ -450,39 +379,17 @@ def _upload_in_worker(
                 hashlib.sha256(peer_der).digest(), expected_pin
             ):
                 raise TelemetryTransportError("trust_error")
-            headers = {
-                "Accept": "application/json",
-                "Accept-Encoding": "identity",
-                "Content-Type": "application/json",
-                "One-OS-Telemetry-Protocol": protocol,
-            }
-            if authorization_mode == "historical_backlog":
-                if historical_receipt_sha256 is None:
-                    raise TelemetryTransportError("protocol_error")
-                headers.update(
-                    {
-                        "One-OS-Telemetry-Authorization-Mode": authorization_mode,
-                        "One-OS-Historical-Authorization-Receipt-Sha256": (
-                            historical_receipt_sha256
-                        ),
-                    }
-                )
             connection.request(
                 "POST",
                 TELEMETRY_PATH,
                 body=request_bytes,
-                headers=headers,
+                headers={
+                    "Accept": "application/json",
+                    "Accept-Encoding": "identity",
+                    "Content-Type": "application/json",
+                },
             )
-            return _read_ack(
-                connection,
-                deadline=deadline,
-                max_ack_bytes=max_ack_bytes,
-                protocol=protocol,
-                expected_batch_id=parsed_request.document["batchId"],
-                expected_request_sha256=(
-                    parsed_request.request_sha256 if protocol == "2.0" else None
-                ),
-            )
+            return _read_ack(connection, deadline=deadline, max_ack_bytes=max_ack_bytes)
     except TelemetryTransportError:
         raise
     except DiscoveryError as error:
@@ -533,25 +440,9 @@ class TelemetryUploadTransport:
         request_bytes: bytes,
         certificate_pem: str,
         private_key_pem: str,
-        *,
-        protocol: str = "1.0",
-        authorization_mode: str = "current",
-        historical_receipt_sha256: str | None = None,
     ) -> bytes:
         deadline = time.monotonic() + self._timeout
-        if (
-            protocol not in {"1.0", "2.0"}
-            or authorization_mode not in {"current", "historical_backlog"}
-            or (authorization_mode == "historical_backlog")
-            != (historical_receipt_sha256 is not None)
-            or (
-                historical_receipt_sha256 is not None
-                and re.fullmatch(r"[A-Za-z0-9_-]{43}", historical_receipt_sha256) is None
-            )
-            or (protocol != "2.0" and authorization_mode != "current")
-            or not isinstance(request_bytes, bytes)
-            or not (1 <= len(request_bytes) <= MAX_BATCH_BYTES)
-        ):
+        if not isinstance(request_bytes, bytes) or not (1 <= len(request_bytes) <= MAX_BATCH_BYTES):
             raise TelemetryTransportError("protocol_error")
         try:
             origin, fingerprint = self._destination.read()
@@ -562,11 +453,8 @@ class TelemetryUploadTransport:
         except OSError as error:
             raise TelemetryTransportError("unreachable") from error
         try:
-            if protocol == "2.0":
-                parse_telemetry_batch_v2(request_bytes)
-            else:
-                parse_telemetry_batch(request_bytes)
-        except (TelemetryValidationError, TelemetryValidationErrorV2) as error:
+            parse_telemetry_batch(request_bytes)
+        except TelemetryValidationError as error:
             raise TelemetryTransportError("protocol_error") from error
         try:
             certificate_pem, private_key_pem = _normalize_material(certificate_pem, private_key_pem)
@@ -602,9 +490,6 @@ class TelemetryUploadTransport:
                     "fingerprint": fingerprint,
                     "timeout": _remaining(deadline),
                     "maxAckBytes": self._max_ack_bytes,
-                    "protocol": protocol,
-                    "authorizationMode": authorization_mode,
-                    "historicalReceiptSha256": historical_receipt_sha256,
                     "requestFd": request_fd,
                     "requestBytes": len(request_bytes),
                     "certificateFd": certificate_fd,

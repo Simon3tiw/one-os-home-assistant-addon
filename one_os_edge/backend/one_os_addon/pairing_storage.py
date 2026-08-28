@@ -226,23 +226,15 @@ class IdentityStore:
         self._atomic_write(self.root, "ca-chain.pem", chain_pem.encode("ascii"))
 
     def create_renewal_candidate(self) -> ec.EllipticCurvePrivateKey:
-        key = ec.generate_private_key(ec.SECP256R1())
-        self.write_renewal_candidate(key, overwrite=True)
-        return self.load_renewal_candidate()
-
-    def write_renewal_candidate(
-        self, key: ec.EllipticCurvePrivateKey, *, overwrite: bool = False
-    ) -> None:
         self._ensure_directory(self.root)
-        path = self.root / "renewal-key.pem"
-        if not overwrite and (path.exists() or path.is_symlink()):
-            raise UnsafeIdentityStorage("renewal key already exists")
+        key = ec.generate_private_key(ec.SECP256R1())
         pem = key.private_bytes(
             serialization.Encoding.PEM,
             serialization.PrivateFormat.PKCS8,
             serialization.NoEncryption(),
         )
         self._atomic_write(self.root, "renewal-key.pem", pem)
+        return self.load_renewal_candidate()
 
     def load_renewal_candidate(self) -> ec.EllipticCurvePrivateKey:
         try:

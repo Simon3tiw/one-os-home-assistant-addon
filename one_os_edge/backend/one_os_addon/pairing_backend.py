@@ -386,8 +386,6 @@ class PairingBackend:
         self.state = public_state if public_state is not None else {}
         self.clock = clock
         self._operation_lock = RLock()
-        self._renewal_v2 = None
-        self._renewal_v2_terminator = None
         self._audit_actor = "system:edge-worker"
         self._audit_action = "pairing.reconcile"
         self._audit_depth = 0
@@ -534,46 +532,6 @@ class PairingBackend:
 
     def status(self) -> dict[str, Any]:
         return {key: value for key, value in self.state.items() if key not in {"code", "secrets"}}
-
-    def attach_renewal_v2(self, manager) -> None:
-        """Attach the default-off Draft-4 service without triggering an operation."""
-        self._renewal_v2 = manager
-        self._renewal_v2_terminator = manager
-
-    def attach_renewal_v2_terminator(self, manager) -> None:
-        """Attach lifecycle cleanup without enabling the default-off renewal service."""
-        self._renewal_v2_terminator = manager
-
-    def _terminalize_renewal_v2(self, reason: str) -> None:
-        if self._renewal_v2_terminator is None:
-            return
-        try:
-            self._renewal_v2_terminator.terminalize(reason)
-        except Exception as error:
-            raise PairingError("renewal_v2_terminalization_failed") from error
-
-    def start_renewal_v2(self) -> bytes:
-        if self._renewal_v2 is None:
-            raise PairingError("renewal_v2_disabled")
-        return self._renewal_v2.start()
-
-    def cancel_renewal_v2(self) -> bytes:
-        if self._renewal_v2 is None:
-            raise PairingError("renewal_v2_disabled")
-        return self._renewal_v2.cancel()
-
-    def poll_renewal_v2(self) -> bytes:
-        if self._renewal_v2 is None:
-            raise PairingError("renewal_v2_disabled")
-        return self._renewal_v2.poll()
-
-    def finalize_renewal_v2(self) -> bytes:
-        if self._renewal_v2 is None:
-            raise PairingError("renewal_v2_disabled")
-        return self._renewal_v2.finalize()
-
-    def renewal_v2_status(self) -> dict[str, Any] | None:
-        return None if self._renewal_v2 is None else self._renewal_v2.status()
 
     def _current_material(self) -> tuple[str, str]:
         certificate, chain = self.store.read_identity_credential()
@@ -892,7 +850,6 @@ class PairingBackend:
         self.store.delete_renewal()
 
     def _mark_device_revoked(self) -> None:
-        self._terminalize_renewal_v2("revoke")
         self._update_state(
             status="revoked",
             renewalStatus=None,
@@ -943,13 +900,7 @@ class PairingBackend:
         return {"code": transient["displayedCode"], "expiresAt": self.state["codeExpiresAt"]}
 
     @_serialized
-    def start(
-        self,
-        mode: str,
-        installation_id: str,
-        *,
-        _renewal_terminal_reason: str | None = None,
-    ) -> dict[str, Any]:
+    def start(self, mode: str, installation_id: str) -> dict[str, Any]:
         if mode not in {"initial", "repair"}:
             raise PairingError("invalid_pairing_mode")
         try:
@@ -967,7 +918,6 @@ class PairingBackend:
         if self.store.read_transient() is not None:
             raise PairingError("pairing_already_active")
         if mode == "repair":
-            self._terminalize_renewal_v2(_renewal_terminal_reason or "repair")
             self.store.delete_renewal()
         key = self.store.create_candidate()
         spki = key.public_key().public_bytes(
@@ -1449,11 +1399,7 @@ class PairingBackend:
             "identity_missing_after_restore",
         }:
             raise PairingError("repair_not_allowed")
-        return self.start(
-            "repair",
-            self.state["installationId"],
-            _renewal_terminal_reason="replacement",
-        )
+        return self.start("repair", self.state["installationId"])
 
     @_serialized
     def reset(self, local_only: bool = False, terminal: str = "cancelled") -> None:

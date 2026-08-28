@@ -38,11 +38,6 @@ def _materialize(base: dict, operations: list[dict]) -> dict:
                 target[final] = copy.deepcopy(operation["value"])
         elif operation["op"] == "append":
             target[final].append(copy.deepcopy(operation["value"]))
-        elif operation["op"] == "delete":
-            if isinstance(target, list):
-                del target[int(final)]
-            else:
-                del target[final]
         else:
             raise AssertionError(operation)
     return document
@@ -50,7 +45,6 @@ def _materialize(base: dict, operations: list[dict]) -> dict:
 
 def test_golden_batch_matches_canonical_bytes_ids_and_hashes() -> None:
     vectors = _vectors()
-    assert vectors["batch"]["installationRevision"] == 7
     raw = vectors["batchCanonical"].encode("utf-8")
 
     parsed = parse_telemetry_batch(raw)
@@ -316,9 +310,7 @@ def _record_id(record: dict) -> str:
 
 
 def _payload_digest(batch: dict) -> str:
-    payload = {
-        key: batch[key] for key in ("gaps", "installationRevision", "qualityEvents", "samples")
-    }
+    payload = {key: batch[key] for key in ("gaps", "qualityEvents", "samples")}
     digest = hashlib.sha256(
         b"ONE.OS-TELEMETRY-BATCH-PAYLOAD-V1\0" + canonical_json(payload)
     ).digest()

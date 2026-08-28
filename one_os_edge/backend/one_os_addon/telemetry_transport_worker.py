@@ -32,9 +32,6 @@ _METADATA_FIELDS = {
     "fingerprint",
     "timeout",
     "maxAckBytes",
-    "protocol",
-    "authorizationMode",
-    "historicalReceiptSha256",
     "requestFd",
     "requestBytes",
     "certificateFd",
@@ -95,14 +92,7 @@ def main() -> int:
             or type(metadata["maxAckBytes"]) is not int
         ):
             raise ValueError("invalid limits")
-        if (
-            not isinstance(metadata["origin"], str)
-            or not isinstance(metadata["fingerprint"], str)
-            or metadata["protocol"] not in {"1.0", "2.0"}
-            or metadata["authorizationMode"] not in {"current", "historical_backlog"}
-            or (metadata["authorizationMode"] == "historical_backlog")
-            != (metadata["historicalReceiptSha256"] is not None)
-        ):
+        if not isinstance(metadata["origin"], str) or not isinstance(metadata["fingerprint"], str):
             raise ValueError("invalid strings")
         descriptor_names = ("requestFd", "certificateFd", "privateKeyFd", "resultFd")
         descriptors = {metadata[name] for name in descriptor_names}
@@ -132,9 +122,6 @@ def main() -> int:
             private_key_pem,
             timeout=float(metadata["timeout"]),
             max_ack_bytes=max_ack_bytes,
-            protocol=metadata["protocol"],
-            authorization_mode=metadata["authorizationMode"],
-            historical_receipt_sha256=metadata["historicalReceiptSha256"],
         )
         _emit(result_fd, b"A" + ack)
     except TelemetryTransportError as error:

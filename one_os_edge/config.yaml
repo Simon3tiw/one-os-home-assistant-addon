@@ -1,7 +1,7 @@
 name: ONE.OS Edge Connector
-version: "0.4.0"
+version: "0.3.0"
 slug: one_os_edge
-description: Secure ONE.OS pairing, configuration sync and default-off Telemetry v1
+description: Secure ONE.OS pairing and selected Home Assistant configuration sync
 url: https://github.com/Simon3tiw/one-os-home-assistant-addon
 arch:
   - amd64
@@ -13,23 +13,9 @@ panel_icon: mdi:office-building-cog
 panel_title: ONE.OS Commissioning
 homeassistant: "2025.1.0"
 homeassistant_api: true
-options:
-  telemetry_enabled: false
-  telemetry_authority_enabled: false
-  soak_probe_enabled: false
-schema:
-  telemetry_enabled: bool
-  telemetry_authority_enabled: bool
-  soak_probe_enabled: bool
-ports:
-  9443/tcp: null
-ports_description:
-  9443/tcp: ONE.OS Phase 2C mTLS status probe
 backup: cold
 backup_exclude:
   - identity
   - identity/**
   - telemetry-outbox
   - telemetry-outbox/**
-  - soak-probe
-  - soak-probe/**

@@ -18,7 +18,6 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
-from one_os_addon.telemetry_contract_v2 import parse_telemetry_batch as parse_telemetry_batch_v2
 from one_os_addon.telemetry_transport import (
     TELEMETRY_PATH,
     TelemetryDestinationSnapshot,
@@ -28,20 +27,10 @@ from one_os_addon.telemetry_transport import (
 )
 
 CONTRACT = Path(__file__).resolve().parents[3] / "docs/reference/contracts/telemetry/v1"
-V2_VECTORS = (
-    Path(__file__).resolve().parents[3]
-    / "docs/reference/contracts/telemetry/v2"
-    / "one-os-phase2c-p-canonical-vectors-v2-draft4-20260825.json"
-)
 
 
 def _vectors() -> dict:
     return json.loads((CONTRACT / "canonical-vectors.json").read_text(encoding="utf-8"))
-
-
-def _v2_batch() -> bytes:
-    vectors = json.loads(V2_VECTORS.read_text(encoding="utf-8"))
-    return vectors["telemetryBatches256"][0]["canonicalUtf8"].encode("utf-8")
 
 
 def _destination(origin: str, fingerprint: str) -> TelemetryDestinationSnapshot:
@@ -225,107 +214,6 @@ def test_worker_uploads_exact_immutable_bytes_and_returns_exact_ack(telemetry_tl
     assert headers["Content-Type"] == "application/json"
     assert headers["Accept"] == "application/json"
     assert headers["Accept-Encoding"] == "identity"
-
-
-def test_worker_sends_exact_historical_authority_headers(telemetry_tls_server):
-    origin, fingerprint, certificate, private_key = telemetry_tls_server
-    receipt_sha256 = "A" * 43
-    _upload_in_worker(
-        origin,
-        fingerprint,
-        _v2_batch(),
-        certificate,
-        private_key,
-        timeout=2,
-        protocol="2.0",
-        authorization_mode="historical_backlog",
-        historical_receipt_sha256=receipt_sha256,
-    )
-
-    _path, headers, _received, _had_client_certificate = TelemetryHandler.requests[-1]
-    assert headers["One-OS-Telemetry-Protocol"] == "2.0"
-    assert headers["One-OS-Telemetry-Authorization-Mode"] == "historical_backlog"
-    assert headers["One-OS-Historical-Authorization-Receipt-Sha256"] == receipt_sha256
-
-
-def _v2_terminal_error(batch: bytes) -> bytes:
-    parsed = parse_telemetry_batch_v2(batch)
-    return json.dumps(
-        {
-            "batchId": parsed.document["batchId"],
-            "code": "immutable_identity_conflict",
-            "decidedAt": "2030-01-01T12:00:00Z",
-            "requestSha256": parsed.request_sha256,
-            "retryClass": "terminal_quarantine",
-            "schemaVersion": "one-os-telemetry-error/v2",
-        },
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode()
-
-
-def test_subprocess_tls_v2_canonical_terminal_error_is_quarantinable(telemetry_tls_server):
-    origin, fingerprint, certificate, private_key = telemetry_tls_server
-    batch = _v2_batch()
-    TelemetryHandler.status = 409
-    TelemetryHandler.cache_control = None
-    TelemetryHandler.body = _v2_terminal_error(batch)
-
-    transport = TelemetryUploadTransport(_destination(origin, fingerprint), timeout=2)
-    with pytest.raises(TelemetryTransportError, match="immutable_conflict"):
-        transport.upload(batch, certificate, private_key, protocol="2.0")
-
-
-@pytest.mark.parametrize("invalid_kind", ("fastapi_detail", "wrong_alias", "extra_field"))
-def test_subprocess_tls_v2_rejects_noncanonical_or_unbound_terminal_error(
-    telemetry_tls_server, invalid_kind: str
-):
-    origin, fingerprint, certificate, private_key = telemetry_tls_server
-    batch = _v2_batch()
-    if invalid_kind == "fastapi_detail":
-        body = b'{"detail":"Telemetry batch conflicts"}'
-    else:
-        document = json.loads(_v2_terminal_error(batch))
-        if invalid_kind == "wrong_alias":
-            document["batchId"] = "00000000-0000-4000-8000-000000000001"
-        else:
-            document["detail"] = "Telemetry batch conflicts"
-        body = json.dumps(document, separators=(",", ":"), sort_keys=True).encode()
-    TelemetryHandler.status = 409
-    TelemetryHandler.cache_control = None
-    TelemetryHandler.body = body
-
-    transport = TelemetryUploadTransport(_destination(origin, fingerprint), timeout=2)
-    with pytest.raises(TelemetryTransportError, match="protocol_error"):
-        transport.upload(batch, certificate, private_key, protocol="2.0")
-
-
-@pytest.mark.parametrize(
-    ("protocol", "authorization_mode", "receipt_sha256"),
-    (
-        ("2.0", "historical_backlog", None),
-        ("2.0", "current", "A" * 43),
-        ("2.0", "unknown", None),
-        ("1.0", "historical_backlog", "A" * 43),
-    ),
-)
-def test_worker_rejects_invalid_authority_header_combinations_before_network(
-    telemetry_tls_server, protocol, authorization_mode, receipt_sha256
-):
-    origin, fingerprint, certificate, private_key = telemetry_tls_server
-    with pytest.raises(TelemetryTransportError, match="protocol_error"):
-        _upload_in_worker(
-            origin,
-            fingerprint,
-            _vectors()["batchCanonical"].encode("utf-8"),
-            certificate,
-            private_key,
-            timeout=2,
-            protocol=protocol,
-            authorization_mode=authorization_mode,
-            historical_receipt_sha256=receipt_sha256,
-        )
-    assert TelemetryHandler.requests == []
 
 
 def test_wrong_pin_never_loads_or_offers_client_identity(telemetry_tls_server, monkeypatch):

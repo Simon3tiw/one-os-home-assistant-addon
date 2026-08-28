@@ -292,18 +292,12 @@
     },
     "schemaVersion": {
       "const": "1.0"
-    },
-    "installationRevision": {
-      "maximum": 9223372036854775807,
-      "minimum": 0,
-      "type": "integer"
     }
   },
   "required": [
     "schemaVersion",
     "batchId",
     "installationId",
-    "installationRevision",
     "credentialId",
     "createdAt",
     "payloadSha256",

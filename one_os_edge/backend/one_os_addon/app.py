@@ -52,20 +52,16 @@ from .models import (
     uid,
 )
 from .pairing_backend import PairingBackend, PairingError
-from .pairing_crypto import sign_low_s
 from .pairing_repository import PairingRepository
 from .pairing_storage import IdentityStore
 from .pairing_worker import PairingWorker
 from .reconciliation import infer_ontology_class, reconcile
 from .sync import SyncCoordinator
-from .telemetry_authority import TelemetryAuthorityManager
-from .telemetry_authority_cut import TelemetryAuthorityCutRepository
 from .telemetry_delivery import TelemetryDeliveryJournal
 from .telemetry_outbox import TelemetryOutbox
-from .telemetry_renewal import TelemetryRenewalManager
 from .telemetry_transport import TelemetryDestinationSnapshot, TelemetryUploadTransport
 from .telemetry_worker import TelemetryDeliveryWorker
-from .version import DATABASE_REVISION, RELEASE_VERSION
+from .version import RELEASE_VERSION
 
 
 class OverrideBody(BaseModel):
@@ -496,14 +492,9 @@ def create_app(
     telemetry_enabled=False,
     telemetry_spool_dir=None,
     telemetry_worker=None,
-    telemetry_authority_enabled=False,
 ):
     if telemetry_worker is not None and not telemetry_enabled:
         raise ValueError("telemetry worker requires telemetry feature flag")
-    if telemetry_authority_enabled and (
-        not telemetry_enabled or pairing_backend is not None or telemetry_worker is not None
-    ):
-        raise ValueError("telemetry authority requires built-in telemetry and pairing runtimes")
     app = FastAPI(
         title="ONE.OS commissioning API", version="1.0.0", root_path=os.getenv("INGRESS_PATH", "")
     )
@@ -531,16 +522,8 @@ def create_app(
     app.state.configuration_sync = None
     with app.state.session() as identity_session:
         if identity_session.get(EdgeIdentity, 1) is None:
-            installation_id = str(uuid4())
             identity_session.add(
-                EdgeIdentity(
-                    id=1,
-                    installation_id=installation_id,
-                    status="unpaired",
-                    revision=0,
-                    telemetry_authorization_revision=1,
-                    lineage_id=installation_id,
-                )
+                EdgeIdentity(id=1, installation_id=str(uuid4()), status="unpaired", revision=0)
             )
             identity_session.commit()
     supervisor_token = os.getenv("SUPERVISOR_TOKEN")
@@ -584,14 +567,9 @@ def create_app(
             )
     app.state.telemetry_destination = telemetry_destination
     app.state.telemetry_delivery = (
-        TelemetryDeliveryJournal(app.state.session, telemetry_spool)
-        if telemetry_enabled and not telemetry_authority_enabled
-        else None
+        TelemetryDeliveryJournal(app.state.session, telemetry_spool) if telemetry_enabled else None
     )
     app.state.telemetry_worker = telemetry_worker if telemetry_enabled else None
-    app.state.telemetry_authority = None
-    app.state.telemetry_authority_cut = None
-    app.state.telemetry_renewal = None
     app.state.telemetry_recovery = None
     app.state.destination_tester = destination_tester or test_pinned_discovery
 
@@ -617,35 +595,6 @@ def create_app(
                 repository=pairing_repository,
             )
             app.state.pairing = pairing_runtime
-            authority_manager = None
-            if telemetry_authority_enabled:
-                authority_manager = TelemetryAuthorityManager(
-                    app.state.session,
-                    central_pairing,
-                    pairing_runtime.active_transport_identity,
-                    lambda preimage: sign_low_s(identity_store.load_identity(), preimage),
-                )
-            renewal_manager = TelemetryRenewalManager(
-                app.state.session,
-                identity_store,
-                central_pairing,
-                pairing_runtime.active_transport_identity,
-                lambda preimage: sign_low_s(identity_store.load_identity(), preimage),
-                reactivate=authority_manager.activate if authority_manager is not None else None,
-            )
-            pairing_runtime.attach_renewal_v2_terminator(renewal_manager)
-            if authority_manager is not None:
-                app.state.telemetry_authority = authority_manager
-                app.state.telemetry_authority_cut = TelemetryAuthorityCutRepository(
-                    app.state.session
-                )
-                app.state.telemetry_renewal = renewal_manager
-                pairing_runtime.attach_renewal_v2(renewal_manager)
-                app.state.telemetry_delivery = TelemetryDeliveryJournal(
-                    app.state.session,
-                    telemetry_spool,
-                    authority_manager=authority_manager,
-                )
             app.state.configuration_sync = ConfigurationSnapshotSync(
                 app.state.configuration_snapshot_repository,
                 pairing_repository.load,
@@ -676,8 +625,6 @@ def create_app(
             cleanup.callback(engine.dispose)
             if app.state.telemetry_outbox:
                 app.state.telemetry_recovery = app.state.telemetry_outbox.recover()
-            if app.state.telemetry_authority:
-                app.state.telemetry_authority.activate()
             if app.state.pairing_worker:
                 cleanup.push_async_callback(app.state.pairing_worker.stop)
                 await app.state.pairing_worker.start()
@@ -1573,7 +1520,7 @@ def create_app(
                 "installationHash": hashlib.sha256(
                     (site.installation_id if site else "uninitialized").encode()
                 ).hexdigest(),
-                "databaseRevision": DATABASE_REVISION,
+                "databaseRevision": "0013",
                 "connectorPresence": app.state.ha.connector_presence,
                 "lastSync": {
                     "at": last.at.isoformat() if last else None,
@@ -1610,7 +1557,4 @@ def create_app(
 app = create_app(
     start_background_sync=True,
     telemetry_enabled=os.getenv("ONE_OS_TELEMETRY_ENABLED", "false").strip().lower() == "true",
-    telemetry_authority_enabled=(
-        os.getenv("ONE_OS_TELEMETRY_AUTHORITY_ENABLED", "false").strip().lower() == "true"
-    ),
 )

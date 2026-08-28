@@ -291,7 +291,7 @@ class ConfigurationSnapshotRepository:
                 )
             )
             config_version = (last_version or 0) + 1
-            if config_version > 9223372036854775807:
+            if config_version > 18446744073709551615:
                 raise SnapshotProjectionError("config_version_exhausted")
             captured = self._clock().astimezone(UTC)
             body = {

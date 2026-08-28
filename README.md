@@ -7,8 +7,8 @@ Private Home Assistant OS add-on repository for ONE.OS local discovery and commi
 - Source repository: `Simon3tiw/one-os`
 - Approved design commit: `ae2df5f83d27a96df9d8ee59ab63a6822f408baa`
 - Add-on repository baseline: `60d224b9950b9c6dcc36bd779df609c5cb86ce50`
-- Scope: Phase 2B plus the default-off Phase 2C Telemetry v1 client — secure ONE.OS Central pairing and certificate lifecycle, read-only Home Assistant discovery, local ontology, commissioning UI, persistence, selected-configuration synchronization and a bounded durable offline telemetry outbox.
-- Telemetry v1 uses outbound HTTPS batches over a pinned device-mTLS connection and remains disabled by default. Cloud commands and Home Assistant service calls remain excluded.
+- Scope: Phase 2B — secure ONE.OS Central pairing and certificate lifecycle, read-only Home Assistant discovery, local ontology, commissioning UI, persistence and selected-configuration synchronization.
+- Phase 2C remains excluded: MQTT telemetry, offline telemetry outbox, cloud commands and Home Assistant service calls.
 
 The immutable reference snapshot is stored under `docs/reference/`. Development, build, backup and security instructions are in `docs/development.md`; commissioning behavior is in `docs/commissioning.md`.
 

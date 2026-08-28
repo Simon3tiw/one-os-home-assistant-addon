@@ -17,36 +17,20 @@ from sqlalchemy import select, text
 from .models import (
     EdgeIdentity,
     Site,
-    TelemetryAuthorityCut,
     TelemetryBatch,
     TelemetryBatchGap,
     TelemetryBatchRecord,
     TelemetryGap,
     TelemetryIngestState,
-    TelemetryJournalState,
     TelemetryOutboxRecord,
     TelemetryOutboxSegment,
 )
-from .telemetry_authority import TelemetryAuthorityError
 from .telemetry_contract_v1 import (
     MAX_RECORDS,
     TelemetryValidationError,
     canonical_json,
     parse_telemetry_ack,
     parse_telemetry_batch,
-)
-from .telemetry_contract_v2 import (
-    TelemetryValidationError as TelemetryValidationErrorV2,
-)
-from .telemetry_contract_v2 import (
-    canonical_json as canonical_json_v2,
-)
-from .telemetry_contract_v2 import parse_historical_receipt
-from .telemetry_contract_v2 import (
-    parse_telemetry_ack as parse_telemetry_ack_v2,
-)
-from .telemetry_contract_v2 import (
-    parse_telemetry_batch as parse_telemetry_batch_v2,
 )
 from .telemetry_outbox import TelemetryOutbox, _fsync_directory
 
@@ -58,17 +42,6 @@ class TelemetryDeliveryError(RuntimeError):
     pass
 
 
-def _begin_write(session) -> str:
-    dialect = session.get_bind().dialect.name
-    if dialect == "sqlite":
-        session.execute(text("BEGIN IMMEDIATE"))
-    return dialect
-
-
-def _locked(statement, dialect: str):
-    return statement.with_for_update() if dialect == "postgresql" else statement
-
-
 @dataclass(frozen=True)
 class StoredTelemetryBatch:
     batch_id: str
@@ -77,9 +50,6 @@ class StoredTelemetryBatch:
     status: str
     lease_until: datetime | None
     attempt_count: int
-    protocol: str
-    historical_receipt_sha256: str | None = None
-    ingest_authorization_revision: int | None = None
 
 
 def _b64digest(value: bytes) -> str:
@@ -104,23 +74,6 @@ def _timestamp(value: datetime) -> str:
     return rendered.replace(".000Z", "Z")
 
 
-def _timestamp_millis(value: datetime) -> str:
-    if value.tzinfo is None:
-        raise TelemetryDeliveryError("naive_clock")
-    return value.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-
-
-def _v2_record(document: dict) -> dict:
-    result = dict(document)
-    for key in ("observedAt", "receivedAtEdge", "detectedAt"):
-        value = result.get(key)
-        if isinstance(value, str) and value.endswith("Z") and "." not in value:
-            result[key] = value[:-1] + ".000Z"
-    if "reason" in result:
-        result["reason"] = "storage_failure"
-    return result
-
-
 class TelemetryDeliveryJournal:
     def __init__(
         self,
@@ -129,47 +82,14 @@ class TelemetryDeliveryJournal:
         *,
         uuid_factory=lambda: str(uuid4()),
         clock=lambda: datetime.now(UTC),
-        authority_manager=None,
     ) -> None:
         self._session_factory = session_factory
         self._spool_dir = Path(spool_dir)
         self._uuid_factory = uuid_factory
         self._clock = clock
-        self._authority_manager = authority_manager
 
     @staticmethod
-    def _stored(
-        batch: TelemetryBatch,
-        *,
-        historical_receipt_sha256: str | None = None,
-        ingest_authorization_revision: int | None = None,
-    ) -> StoredTelemetryBatch:
-        try:
-            parsed = parse_telemetry_batch(batch.request_bytes)
-            protocol = "1.0"
-        except TelemetryValidationError:
-            try:
-                parsed = parse_telemetry_batch_v2(batch.request_bytes)
-                protocol = "2.0"
-            except TelemetryValidationErrorV2:
-                raise TelemetryDeliveryError("stored_batch_protocol_conflict") from None
-        if (
-            not hmac.compare_digest(parsed.request_sha256, batch.request_sha256)
-            or not hmac.compare_digest(parsed.payload_sha256, batch.payload_sha256)
-            or parsed.document["batchId"] != batch.batch_id
-            or parsed.document["installationId"] != batch.installation_id
-            or parsed.document["credentialId"] != batch.credential_id
-            or (
-                protocol == "2.0"
-                and parsed.document["batchAuthorizationRevision"]
-                != batch.batch_authorization_revision
-            )
-            or (
-                protocol == "1.0"
-                and parsed.document["installationRevision"] != batch.installation_revision
-            )
-        ):
-            raise TelemetryDeliveryError("stored_batch_protocol_conflict")
+    def _stored(batch: TelemetryBatch) -> StoredTelemetryBatch:
         return StoredTelemetryBatch(
             batch_id=batch.batch_id,
             request_bytes=batch.request_bytes,
@@ -177,38 +97,7 @@ class TelemetryDeliveryJournal:
             status=batch.status,
             lease_until=batch.lease_until,
             attempt_count=batch.attempt_count,
-            protocol=protocol,
-            historical_receipt_sha256=historical_receipt_sha256,
-            ingest_authorization_revision=ingest_authorization_revision,
         )
-
-    @staticmethod
-    def _historical_authority(session, batch: TelemetryBatch) -> tuple[str | None, int | None]:
-        cut = session.scalar(
-            select(TelemetryAuthorityCut).where(
-                TelemetryAuthorityCut.installation_id == batch.installation_id,
-                TelemetryAuthorityCut.milestone == "receipt_stored",
-                TelemetryAuthorityCut.cut_journal_max_id >= batch.journal_id,
-            )
-        )
-        if cut is None:
-            return None, None
-        if cut.receipt_bytes is None or cut.receipt_sha256 is None:
-            raise TelemetryDeliveryError("historical_authority_conflict")
-        receipt, exact = parse_historical_receipt(cut.receipt_bytes)
-        entry = next(
-            (item for item in receipt["entries"] if item["journalId"] == batch.journal_id), None
-        )
-        if (
-            exact != cut.receipt_bytes
-            or not hmac.compare_digest(hashlib.sha256(exact).digest(), cut.receipt_sha256)
-            or entry is None
-            or entry["batchId"] != batch.batch_id
-            or entry["requestSha256"] != batch.request_sha256
-            or entry["requestLength"] != len(batch.request_bytes)
-        ):
-            raise TelemetryDeliveryError("historical_authority_conflict")
-        return _b64digest(exact), cut.ingest_authorization_revision
 
     def acquire(
         self,
@@ -224,19 +113,16 @@ class TelemetryDeliveryJournal:
         if self.get_or_create_pending() is None:
             return None
         with self._session_factory() as session:
-            dialect = _begin_write(session)
+            session.execute(text("BEGIN IMMEDIATE"))
             now = self._clock()
             if now.tzinfo is None:
                 raise TelemetryDeliveryError("naive_clock")
             now = now.astimezone(UTC)
             batch = session.scalar(
-                _locked(
-                    select(TelemetryBatch)
-                    .where(TelemetryBatch.status.in_(("pending", "leased")))
-                    .order_by(TelemetryBatch.created_at, TelemetryBatch.batch_id)
-                    .limit(1),
-                    dialect,
-                )
+                select(TelemetryBatch)
+                .where(TelemetryBatch.status.in_(("pending", "leased")))
+                .order_by(TelemetryBatch.created_at, TelemetryBatch.batch_id)
+                .limit(1)
             )
             if batch is None:
                 session.rollback()
@@ -256,13 +142,8 @@ class TelemetryDeliveryJournal:
                     lease_until = lease_until.replace(tzinfo=UTC)
                 if lease_until > now:
                     if batch.lease_owner == owner:
-                        receipt_sha, ingest_revision = self._historical_authority(session, batch)
                         session.rollback()
-                        return self._stored(
-                            batch,
-                            historical_receipt_sha256=receipt_sha,
-                            ingest_authorization_revision=ingest_revision,
-                        )
+                        return self._stored(batch)
                     session.rollback()
                     return None
             batch.status = "leased"
@@ -271,13 +152,8 @@ class TelemetryDeliveryJournal:
             batch.attempt_count += 1
             batch.last_attempt_at = now
             batch.next_attempt_at = None
-            receipt_sha, ingest_revision = self._historical_authority(session, batch)
             session.commit()
-            return self._stored(
-                batch,
-                historical_receipt_sha256=receipt_sha,
-                ingest_authorization_revision=ingest_revision,
-            )
+            return self._stored(batch)
 
     def release_for_retry(
         self,
@@ -293,14 +169,12 @@ class TelemetryDeliveryJournal:
         if delay_seconds < 1 or delay_seconds > 3600:
             raise TelemetryDeliveryError("invalid_retry_delay")
         with self._session_factory() as session:
-            dialect = _begin_write(session)
+            session.execute(text("BEGIN IMMEDIATE"))
             now = self._clock()
             if now.tzinfo is None:
                 raise TelemetryDeliveryError("naive_clock")
             now = now.astimezone(UTC)
-            batch = session.scalar(
-                _locked(select(TelemetryBatch).where(TelemetryBatch.batch_id == batch_id), dialect)
-            )
+            batch = session.get(TelemetryBatch, batch_id)
             if batch is None:
                 raise TelemetryDeliveryError("batch_missing")
             if batch.status != "leased" or batch.lease_owner != owner:
@@ -318,40 +192,6 @@ class TelemetryDeliveryJournal:
             batch.next_attempt_at = now + delay
             session.commit()
 
-    def mark_current_attempt(self, *, batch_id: str, owner: str) -> None:
-        """Persist exact current-authority send evidence before the network call."""
-        _uuid4(batch_id)
-        if not re.fullmatch(r"[A-Za-z0-9._:-]{1,64}", owner):
-            raise TelemetryDeliveryError("invalid_lease_owner")
-        with self._session_factory() as session:
-            dialect = _begin_write(session)
-            batch = session.scalar(
-                _locked(select(TelemetryBatch).where(TelemetryBatch.batch_id == batch_id), dialect)
-            )
-            if batch is None:
-                raise TelemetryDeliveryError("batch_missing")
-            if batch.status != "leased" or batch.lease_owner != owner:
-                raise TelemetryDeliveryError("lease_not_owned")
-            if batch.lease_until is None:
-                raise TelemetryDeliveryError("invalid_lease_state")
-            now = self._clock()
-            if now.tzinfo is None:
-                raise TelemetryDeliveryError("naive_clock")
-            now = now.astimezone(UTC)
-            lease_until = batch.lease_until
-            if lease_until.tzinfo is None:
-                lease_until = lease_until.replace(tzinfo=UTC)
-            if lease_until <= now:
-                raise TelemetryDeliveryError("lease_expired")
-            receipt_sha, _ingest_revision = self._historical_authority(session, batch)
-            if receipt_sha is not None:
-                raise TelemetryDeliveryError("historical_authority_required")
-            self._stored(batch)
-            batch.current_attempt_request_sha256 = batch.request_sha256
-            batch.current_attempt_authorization_revision = batch.batch_authorization_revision
-            batch.current_attempt_at = now
-            session.commit()
-
     def acknowledge(
         self,
         *,
@@ -364,10 +204,8 @@ class TelemetryDeliveryJournal:
             raise TelemetryDeliveryError("invalid_lease_owner")
         cleanup_paths: list[Path] = []
         with self._session_factory() as session:
-            dialect = _begin_write(session)
-            batch = session.scalar(
-                _locked(select(TelemetryBatch).where(TelemetryBatch.batch_id == batch_id), dialect)
-            )
+            session.execute(text("BEGIN IMMEDIATE"))
+            batch = session.get(TelemetryBatch, batch_id)
             if batch is None:
                 raise TelemetryDeliveryError("batch_missing")
             if batch.status == "acked":
@@ -391,58 +229,17 @@ class TelemetryDeliveryJournal:
             accepted_at = accepted_at.astimezone(UTC)
             if lease_until <= accepted_at:
                 raise TelemetryDeliveryError("lease_expired")
-            stored = self._stored(batch)
-            receipt_sha, ingest_revision = self._historical_authority(session, batch)
+            parsed_batch = parse_telemetry_batch(batch.request_bytes)
             state = session.get(TelemetryIngestState, batch.installation_id)
             previous_cursor = state.last_ingest_cursor if state is not None else -1
             try:
-                if stored.protocol == "2.0":
-                    parsed_batch = parse_telemetry_batch_v2(batch.request_bytes)
-                    try:
-                        ack = parse_telemetry_ack_v2(
-                            ack_bytes,
-                            expected_batch=parsed_batch.document,
-                            expected_request_sha256=batch.request_sha256,
-                            expected_ingest_authorization_revision=(
-                                ingest_revision
-                                if ingest_revision is not None
-                                else batch.batch_authorization_revision
-                            ),
-                            previous_ingest_cursor=previous_cursor,
-                            expected_historical_receipt_sha256=receipt_sha,
-                        )
-                    except TelemetryValidationErrorV2:
-                        if receipt_sha is None:
-                            raise
-                        if (
-                            batch.current_attempt_at is None
-                            or batch.current_attempt_request_sha256 is None
-                            or batch.current_attempt_authorization_revision is None
-                            or not hmac.compare_digest(
-                                batch.current_attempt_request_sha256, batch.request_sha256
-                            )
-                            or batch.current_attempt_authorization_revision
-                            != batch.batch_authorization_revision
-                        ):
-                            raise
-                        ack = parse_telemetry_ack_v2(
-                            ack_bytes,
-                            expected_batch=parsed_batch.document,
-                            expected_request_sha256=batch.request_sha256,
-                            expected_ingest_authorization_revision=(
-                                batch.batch_authorization_revision
-                            ),
-                            previous_ingest_cursor=previous_cursor,
-                        )
-                else:
-                    parsed_batch = parse_telemetry_batch(batch.request_bytes)
-                    ack = parse_telemetry_ack(
-                        ack_bytes,
-                        expected_batch=parsed_batch.document,
-                        expected_request_sha256=batch.request_sha256,
-                        previous_ingest_cursor=previous_cursor,
-                    )
-            except (TelemetryValidationError, TelemetryValidationErrorV2):
+                ack = parse_telemetry_ack(
+                    ack_bytes,
+                    expected_batch=parsed_batch.document,
+                    expected_request_sha256=batch.request_sha256,
+                    previous_ingest_cursor=previous_cursor,
+                )
+            except TelemetryValidationError:
                 session.rollback()
                 raise TelemetryDeliveryError("invalid_ack") from None
 
@@ -524,14 +321,12 @@ class TelemetryDeliveryJournal:
         if reason not in {"immutable_conflict", "expired_payload"}:
             raise TelemetryDeliveryError("invalid_terminal_reason")
         with self._session_factory() as session:
-            dialect = _begin_write(session)
+            session.execute(text("BEGIN IMMEDIATE"))
             now = self._clock()
             if now.tzinfo is None:
                 raise TelemetryDeliveryError("naive_clock")
             now = now.astimezone(UTC)
-            batch = session.scalar(
-                _locked(select(TelemetryBatch).where(TelemetryBatch.batch_id == batch_id), dialect)
-            )
+            batch = session.get(TelemetryBatch, batch_id)
             if batch is None:
                 raise TelemetryDeliveryError("batch_missing")
             if batch.status != "leased" or batch.lease_owner != owner:
@@ -613,21 +408,8 @@ class TelemetryDeliveryJournal:
         }
 
     def get_or_create_pending(self) -> StoredTelemetryBatch | None:
-        try:
-            enabled_revision = (
-                self._authority_manager.enabled_revision()
-                if self._authority_manager is not None
-                else None
-            )
-        except TelemetryAuthorityError:
-            raise TelemetryDeliveryError("activation_state_conflict") from None
         with self._session_factory() as session:
-            dialect = _begin_write(session)
-            journal_state = session.scalar(
-                _locked(select(TelemetryJournalState).where(TelemetryJournalState.id == 1), dialect)
-            )
-            if journal_state is None:
-                raise TelemetryDeliveryError("journal_state_missing")
+            session.execute(text("BEGIN IMMEDIATE"))
             existing = session.scalar(
                 select(TelemetryBatch)
                 .where(TelemetryBatch.status.in_(("pending", "leased")))
@@ -637,17 +419,6 @@ class TelemetryDeliveryJournal:
             if existing is not None:
                 session.rollback()
                 return self._stored(existing)
-            open_cut = session.scalar(
-                _locked(
-                    select(TelemetryAuthorityCut)
-                    .where(TelemetryAuthorityCut.milestone != "terminal")
-                    .limit(1),
-                    dialect,
-                )
-            )
-            if open_cut is not None:
-                session.rollback()
-                raise TelemetryDeliveryError("renewal_cut_blocks_batch_formation")
 
             identity = session.get(EdgeIdentity, 1)
             site = session.scalar(select(Site).limit(1))
@@ -657,20 +428,10 @@ class TelemetryDeliveryJournal:
                 or identity.status != "paired"
                 or identity.installation_id != site.installation_id
                 or identity.credential_id is None
-                or identity.installation_revision is None
-                or type(identity.installation_revision) is not int
-                or not 0 <= identity.installation_revision <= 9_223_372_036_854_775_807
-                or type(identity.telemetry_authorization_revision) is not int
-                or not 1 <= identity.telemetry_authorization_revision <= 9_223_372_036_854_775_807
             ):
                 raise TelemetryDeliveryError("identity_not_delivery_eligible")
             installation_id = _uuid4(site.installation_id)
             credential_id = _uuid4(identity.credential_id)
-            installation_revision = identity.installation_revision
-            batch_authorization_revision = identity.telemetry_authorization_revision
-            use_v2 = enabled_revision is not None
-            if use_v2 and enabled_revision != batch_authorization_revision:
-                raise TelemetryDeliveryError("activation_revision_conflict")
 
             record_rows = session.execute(
                 select(TelemetryOutboxRecord, TelemetryOutboxSegment)
@@ -735,11 +496,6 @@ class TelemetryDeliveryJournal:
                 session.rollback()
                 return None
 
-            if not 0 <= journal_state.last_journal_id < 9_223_372_036_854_775_807:
-                raise TelemetryDeliveryError("journal_id_saturated")
-            journal_state.last_journal_id += 1
-            journal_id = journal_state.last_journal_id
-
             samples = sorted(
                 (item[3] for item in chosen if item[1] == "sample"),
                 key=lambda value: (value["pointId"], value["streamEpochId"], value["sequence"]),
@@ -756,61 +512,22 @@ class TelemetryDeliveryJournal:
                     value["firstMissingSequence"],
                 ),
             )
+            payload = {"gaps": gaps, "qualityEvents": quality_events, "samples": samples}
             batch_id = _uuid4(self._uuid_factory())
-            if use_v2:
-                samples = [_v2_record(value) for value in samples]
-                quality_events = [_v2_record(value) for value in quality_events]
-                gaps = [_v2_record(value) for value in gaps]
-                payload = {
-                    "batchAuthorizationRevision": batch_authorization_revision,
-                    "gaps": gaps,
-                    "qualityEvents": quality_events,
-                    "samples": samples,
-                }
-                document = {
-                    "schemaVersion": "one-os-telemetry-batch/v2",
-                    "batchId": batch_id,
-                    "installationId": installation_id,
-                    "batchAuthorizationRevision": batch_authorization_revision,
-                    "credentialId": credential_id,
-                    "createdAt": _timestamp_millis(self._clock()),
-                    "payloadSha256": _b64digest(
-                        b"ONE.OS-TELEMETRY-BATCH-PAYLOAD-V2\0" + canonical_json_v2(payload)
-                    ),
-                    "samples": samples,
-                    "qualityEvents": quality_events,
-                    "gaps": gaps,
-                }
-                request_bytes = canonical_json_v2(document)
-                try:
-                    parsed = parse_telemetry_batch_v2(request_bytes)
-                except TelemetryValidationErrorV2 as error:
-                    raise TelemetryDeliveryError(f"v2_batch_conflict:{error.code}") from None
-            else:
-                payload = {
-                    "gaps": gaps,
-                    "installationRevision": installation_revision,
-                    "qualityEvents": quality_events,
-                    "samples": samples,
-                }
-                document = {
-                    "schemaVersion": "1.0",
-                    "batchId": batch_id,
-                    "installationId": installation_id,
-                    "installationRevision": installation_revision,
-                    "credentialId": credential_id,
-                    "createdAt": _timestamp(self._clock()),
-                    "payloadSha256": _b64digest(_PAYLOAD_DOMAIN + canonical_json(payload)),
-                    **payload,
-                }
-                request_bytes = canonical_json(document)
-                parsed = parse_telemetry_batch(request_bytes)
+            document = {
+                "schemaVersion": "1.0",
+                "batchId": batch_id,
+                "installationId": installation_id,
+                "credentialId": credential_id,
+                "createdAt": _timestamp(self._clock()),
+                "payloadSha256": _b64digest(_PAYLOAD_DOMAIN + canonical_json(payload)),
+                **payload,
+            }
+            request_bytes = canonical_json(document)
+            parsed = parse_telemetry_batch(request_bytes)
             batch = TelemetryBatch(
                 batch_id=batch_id,
                 installation_id=installation_id,
-                installation_revision=installation_revision,
-                batch_authorization_revision=batch_authorization_revision,
-                journal_id=journal_id,
                 credential_id=credential_id,
                 payload_sha256=parsed.payload_sha256,
                 request_sha256=parsed.request_sha256,

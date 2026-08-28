@@ -104,9 +104,6 @@ def test_diagnostics_is_allowlist_only_and_audit_is_safe(client, auth, fake_ha):
             TelemetryBatch(
                 batch_id="99999999-9999-4999-8999-999999999999",
                 installation_id="88888888-8888-4888-8888-888888888888",
-                installation_revision=1,
-                batch_authorization_revision=1,
-                journal_id=1,
                 credential_id="77777777-7777-4777-8777-777777777777",
                 payload_sha256="DO_NOT_EXPORT_PAYLOAD_HASH",
                 request_sha256="DO_NOT_EXPORT_REQUEST_HASH",
@@ -142,8 +139,8 @@ def test_diagnostics_is_allowlist_only_and_audit_is_safe(client, auth, fake_ha):
         "storage",
         "telemetryDelivery",
     }
-    assert diag.json()["softwareVersion"] == "0.4.0"
-    assert diag.json()["databaseRevision"] == "0021"
+    assert diag.json()["softwareVersion"] == "0.3.0"
+    assert diag.json()["databaseRevision"] == "0013"
     assert diag.json()["telemetryDelivery"] == {
         "pending": 0,
         "leased": 0,
@@ -393,7 +390,7 @@ def test_cold_backup_restore_preserves_complete_commissioning_state(tmp_path, fa
         assert not (restored_identity / "identity-private-key.pem").exists()
     restored_app.state.engine.dispose()
     with closing(sqlite3.connect(restored)) as connection:
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0021",)
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0013",)
 
 
 def test_app_database_is_migrated_to_alembic_head(tmp_path, fake_ha):
@@ -406,7 +403,7 @@ def test_app_database_is_migrated_to_alembic_head(tmp_path, fake_ha):
     app = create_app(database_url=f"sqlite:///{database}", ha_client=fake_ha)
     app.state.engine.dispose()
     with closing(sqlite3.connect(database)) as connection:
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0021",)
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0013",)
 
 
 def test_explicit_database_url_wins_over_ambient_database_url(tmp_path, fake_ha, monkeypatch):
@@ -423,7 +420,7 @@ def test_explicit_database_url_wins_over_ambient_database_url(tmp_path, fake_ha,
     app.state.engine.dispose()
 
     with closing(sqlite3.connect(explicit)) as connection:
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0021",)
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0013",)
         assert connection.execute("SELECT COUNT(*) FROM edge_identity").fetchone() == (1,)
     assert not ambient.exists()
 
