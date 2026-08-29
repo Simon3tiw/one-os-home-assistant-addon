@@ -629,3 +629,37 @@ def test_device_lifecycle_routes_are_strict_no_store_and_select_required_mtls(
     PairingHandler.cache_control = None
     with pytest.raises(CentralProtocolError, match="protocol_error"):
         client.device_status(current_certificate, current_key)
+
+
+def test_draft4_renewal_client_preserves_exact_request_and_response_bytes(
+    pairing_tls_server,
+) -> None:
+    origin, fingerprint, certificate, private_key = pairing_tls_server
+    client = CentralPairingHTTPClient(lambda: (origin, fingerprint), timeout=2)
+    request_id = str(uuid4())
+    cancel_id = str(uuid4())
+    request = b'{"protocol":"2.0","requestId":"' + request_id.encode() + b'"}'
+    response = b'{"protocol":"2.0","status":"pending"}'
+    PairingHandler.cache_control = "no-store"
+    PairingHandler.body = response
+    PairingHandler.status = 202
+
+    assert client.start_renewal_v2(request, certificate, private_key) == response
+    assert PairingHandler.requests[-1][0] == "/api/v1/edge/device/renewal"
+    assert PairingHandler.requests[-1][1]["One-OS-Telemetry-Protocol"] == "2.0"
+    assert PairingHandler.requests[-1][2] == request
+
+    PairingHandler.status = 200
+    assert client.renewal_status_v2(request_id, certificate, private_key) == response
+    assert PairingHandler.requests[-1][0] == f"/api/v1/edge/device/renewals/{request_id}"
+    assert client.ack_renewal_v2(request_id, request, certificate, private_key) == response
+    assert PairingHandler.requests[-1][0] == f"/api/v1/edge/device/renewals/{request_id}/ack"
+    assert PairingHandler.requests[-1][1]["One-OS-Telemetry-Protocol"] == "2.0"
+    assert PairingHandler.requests[-1][2] == request
+    assert client.cancel_renewal_v2(request_id, request, certificate, private_key) == response
+    assert PairingHandler.requests[-1][0] == f"/api/v1/edge/device/renewals/{request_id}/cancel"
+    assert PairingHandler.requests[-1][1]["One-OS-Telemetry-Protocol"] == "2.0"
+    assert client.cancel_status_v2(cancel_id, certificate, private_key) == response
+    assert PairingHandler.requests[-1][0] == (
+        f"/api/v1/edge/device/renewal-cancellations/{cancel_id}"
+    )

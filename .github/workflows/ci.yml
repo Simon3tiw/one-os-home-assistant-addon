@@ -25,6 +25,53 @@ jobs:
       - run: uv run pytest -q --ignore=one_os_edge/backend/tests/test_phase2b_lifecycle_e2e.py
       - run: uv run pip-audit
 
+  postgresql-migrations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      ONE_OS_EDGE_TEST_POSTGRES_ADMIN_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/postgres
+      ONE_OS_EDGE_TEST_POSTGRES_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/one_os_edge_ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: uv sync --frozen --all-extras
+      - name: Prepare fixed concurrency database
+        run: |
+          PGPASSWORD=postgres psql --host=127.0.0.1 --port=5432 --username=postgres --dbname=postgres \
+            -v ON_ERROR_STOP=1 -c 'CREATE DATABASE one_os_edge_ci'
+          uv run python - <<'PY'
+          import os
+          from one_os_addon.app import create_app
+          app = create_app(
+              database_url=os.environ["ONE_OS_EDGE_TEST_POSTGRES_URL"],
+              pairing_backend=False,
+              start_pairing_worker=False,
+          )
+          app.state.engine.dispose()
+          PY
+      - name: Required PostgreSQL migration and concurrency gates
+        run: >-
+          uv run pytest -q
+          one_os_edge/backend/tests/test_alembic_postgresql_compatibility.py
+          one_os_edge/backend/tests/test_telemetry_authority_postgresql.py
+
   phase2b-lifecycle:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -149,7 +196,7 @@ jobs:
 
   release-bundle:
     runs-on: ubuntu-latest
-    needs: [backend, phase2b-lifecycle, frontend, home-assistant-lint, container]
+    needs: [backend, postgresql-migrations, phase2b-lifecycle, frontend, home-assistant-lint, container]
     steps:
       - uses: actions/checkout@v4
       - name: Build manual-install bundle

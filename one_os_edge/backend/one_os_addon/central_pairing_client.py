@@ -34,6 +34,8 @@ _CONFIGURATION_SNAPSHOT_PATH = "/api/v1/edge/device/configuration-snapshots"
 _CONFIGURATION_STATUS_PATH = "/api/v1/edge/device/configuration-status"
 _DEVICE_STATUS_PATH = "/api/v1/edge/device/status"
 _RENEWAL_PATH = "/api/v1/edge/device/renewal"
+_TELEMETRY_CAPABILITY_PATH = f"{_RENEWAL_PATH}/capability"
+_TELEMETRY_ENABLE_PATH = f"{_RENEWAL_PATH}/enable"
 _MAX_CONFIGURATION_SNAPSHOT_BYTES = 2 * 1024 * 1024
 _RESOLVER_SLOTS = threading.BoundedSemaphore(2)
 
@@ -550,6 +552,129 @@ class CentralPairingHTTPClient:
             exact_content_type=True,
         )
 
+    def get_capability(self, certificate_pem: str, private_key_pem: str) -> bytes:
+        return self._request(
+            "GET",
+            _TELEMETRY_CAPABILITY_PATH,
+            None,
+            None,
+            client_material=(certificate_pem, private_key_pem),
+            require_no_store=True,
+            exact_content_type=True,
+        )
+
+    def enable(self, request_bytes: bytes, certificate_pem: str, private_key_pem: str) -> bytes:
+        if not isinstance(request_bytes, bytes) or not 1 <= len(request_bytes) <= self._max_body:
+            raise CentralProtocolError("protocol_error")
+        return self._request(
+            "POST",
+            _TELEMETRY_ENABLE_PATH,
+            request_bytes,
+            None,
+            client_material=(certificate_pem, private_key_pem),
+            require_no_store=True,
+            exact_content_type=True,
+        )
+
+    def start_renewal_v2(
+        self, request_bytes: bytes, certificate_pem: str, private_key_pem: str
+    ) -> bytes:
+        return self._raw_device_request(
+            "POST",
+            _RENEWAL_PATH,
+            request_bytes,
+            certificate_pem,
+            private_key_pem,
+            202,
+            telemetry_protocol="2.0",
+        )
+
+    def renewal_status_v2(
+        self, request_id: str, certificate_pem: str, private_key_pem: str
+    ) -> bytes:
+        return self._raw_device_request(
+            "GET",
+            f"/api/v1/edge/device/renewals/{quote(request_id, safe='')}",
+            None,
+            certificate_pem,
+            private_key_pem,
+        )
+
+    def ack_renewal_v2(
+        self,
+        request_id: str,
+        request_bytes: bytes,
+        certificate_pem: str,
+        private_key_pem: str,
+    ) -> bytes:
+        return self._raw_device_request(
+            "POST",
+            f"/api/v1/edge/device/renewals/{quote(request_id, safe='')}/ack",
+            request_bytes,
+            certificate_pem,
+            private_key_pem,
+            telemetry_protocol="2.0",
+        )
+
+    def cancel_renewal_v2(
+        self,
+        request_id: str,
+        request_bytes: bytes,
+        certificate_pem: str,
+        private_key_pem: str,
+    ) -> bytes:
+        return self._raw_device_request(
+            "POST",
+            f"/api/v1/edge/device/renewals/{quote(request_id, safe='')}/cancel",
+            request_bytes,
+            certificate_pem,
+            private_key_pem,
+            telemetry_protocol="2.0",
+        )
+
+    def cancel_status_v2(
+        self, cancel_request_id: str, certificate_pem: str, private_key_pem: str
+    ) -> bytes:
+        return self._raw_device_request(
+            "GET",
+            f"/api/v1/edge/device/renewal-cancellations/{quote(cancel_request_id, safe='')}",
+            None,
+            certificate_pem,
+            private_key_pem,
+        )
+
+    def _raw_device_request(
+        self,
+        method: str,
+        path: str,
+        request_bytes: bytes | None,
+        certificate_pem: str,
+        private_key_pem: str,
+        expected_status: int = 200,
+        *,
+        telemetry_protocol: str | None = None,
+    ) -> bytes:
+        if request_bytes is not None and (
+            not isinstance(request_bytes, bytes) or not 1 <= len(request_bytes) <= self._max_body
+        ):
+            raise CentralProtocolError("protocol_error")
+        if telemetry_protocol not in {None, "2.0"}:
+            raise CentralProtocolError("protocol_error")
+        result = self._request(
+            method,
+            path,
+            request_bytes,
+            None,
+            client_material=(certificate_pem, private_key_pem),
+            expected_status=expected_status,
+            require_no_store=True,
+            exact_content_type=True,
+            telemetry_protocol=telemetry_protocol,
+        )
+        if not isinstance(result, bytes):
+            raise CentralProtocolError("protocol_error")
+        return result
+
     def start_renewal(
         self, body: dict[str, Any], certificate_pem: str, private_key_pem: str
     ) -> dict[str, Any]:
@@ -595,14 +720,15 @@ class CentralPairingHTTPClient:
         method: str,
         path: str,
         body: dict[str, Any] | bytes | None,
-        response_shapes: tuple[frozenset[str], ...],
+        response_shapes: tuple[frozenset[str], ...] | None,
         *,
         bootstrap_token: str | None = None,
         client_material: tuple[str, str] | None = None,
         expected_status: int = 200,
         require_no_store: bool = False,
         exact_content_type: bool = False,
-    ) -> dict[str, Any]:
+        telemetry_protocol: str | None = None,
+    ) -> dict[str, Any] | bytes:
         deadline = time.monotonic() + self._timeout
         try:
             origin, fingerprint = self._destination()
@@ -651,6 +777,7 @@ class CentralPairingHTTPClient:
                         expected_status,
                         require_no_store,
                         exact_content_type,
+                        telemetry_protocol,
                         guard,
                     )
             except CentralProtocolError:
@@ -676,14 +803,15 @@ class CentralPairingHTTPClient:
         method: str,
         path: str,
         body: dict[str, Any] | bytes | None,
-        response_shapes: tuple[frozenset[str], ...],
+        response_shapes: tuple[frozenset[str], ...] | None,
         fingerprint: str,
         bootstrap_token: str | None,
         expected_status: int,
         require_no_store: bool,
         exact_content_type: bool,
+        telemetry_protocol: str | None,
         guard: _DeadlineSocketGuard,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | bytes:
         connection = _PinnedHTTPSConnection(host, port, target, _remaining(deadline), context)
         wire_body = (
             body
@@ -697,6 +825,8 @@ class CentralPairingHTTPClient:
             headers["Content-Type"] = "application/json"
         if bootstrap_token is not None:
             headers["Authorization"] = f"PairingBootstrap {bootstrap_token}"
+        if telemetry_protocol is not None:
+            headers["One-OS-Telemetry-Protocol"] = telemetry_protocol
         try:
             connection.connect()
             guard.set_socket(connection.sock)
@@ -750,7 +880,7 @@ class CentralPairingHTTPClient:
             _remaining(deadline)
             if len(payload) != declared or len(payload) > self._max_body:
                 raise CentralProtocolError("protocol_error")
-            return _strict_object(payload, response_shapes)
+            return payload if response_shapes is None else _strict_object(payload, response_shapes)
         finally:
             guard.set_socket(None)
             connection.close()

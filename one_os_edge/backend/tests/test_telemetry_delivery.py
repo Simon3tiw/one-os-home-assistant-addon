@@ -19,6 +19,7 @@ from one_os_addon.models import (
     TelemetryOutboxSegment,
 )
 from one_os_addon.telemetry_contract_v1 import canonical_json, parse_telemetry_batch
+from one_os_addon.telemetry_delivery import TelemetryDeliveryError
 from one_os_addon.telemetry_transport import TelemetryTransportError
 from one_os_addon.telemetry_worker import TelemetryDeliveryWorker
 from sqlalchemy import inspect, select
@@ -56,6 +57,7 @@ def _selected_point_and_snapshot(session) -> None:
     identity.installation_id = _INSTALLATION_ID
     identity.status = "paired"
     identity.credential_id = _CREDENTIAL_ID
+    identity.installation_revision = 7
     session.add(Site(id="site-1", installation_id=_INSTALLATION_ID, name="Site"))
     session.flush()
     session.add(
@@ -201,6 +203,9 @@ def test_delivery_journal_migration_and_orm_are_in_parity(tmp_path) -> None:
         "telemetry_batches": {
             "batch_id",
             "installation_id",
+            "installation_revision",
+            "batch_authorization_revision",
+            "journal_id",
             "credential_id",
             "payload_sha256",
             "request_sha256",
@@ -214,6 +219,9 @@ def test_delivery_journal_migration_and_orm_are_in_parity(tmp_path) -> None:
             "attempt_count",
             "last_attempt_at",
             "next_attempt_at",
+            "current_attempt_request_sha256",
+            "current_attempt_authorization_revision",
+            "current_attempt_at",
             "ack_bytes",
             "ingest_cursor",
             "acked_at",
@@ -242,7 +250,7 @@ def test_delivery_journal_migration_and_orm_are_in_parity(tmp_path) -> None:
     app.state.engine.dispose()
 
 
-def test_quarantine_migration_cycles_empty_database_deterministically(tmp_path) -> None:
+def test_revision_binding_migration_cycles_empty_database_deterministically(tmp_path) -> None:
     import sqlite3
     from contextlib import closing
 
@@ -254,12 +262,12 @@ def test_quarantine_migration_cycles_empty_database_deterministically(tmp_path) 
     config.set_main_option("sqlalchemy.url", f"sqlite:///{database}")
     config.attributes["explicit_database_url"] = True
 
-    command.upgrade(config, "0013")
-    command.downgrade(config, "0010")
-    command.upgrade(config, "0013")
+    command.upgrade(config, "0014")
+    command.downgrade(config, "0013")
+    command.upgrade(config, "0014")
 
     with closing(sqlite3.connect(database)) as connection:
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0013",)
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0014",)
 
 
 def test_expired_quarantine_refuses_semantics_losing_downgrade(tmp_path) -> None:
@@ -289,10 +297,13 @@ def test_expired_quarantine_refuses_semantics_losing_downgrade(tmp_path) -> None
     config = Config("one_os_edge/alembic.ini")
     config.set_main_option("sqlalchemy.url", f"sqlite:///{database}")
     config.attributes["explicit_database_url"] = True
-    with pytest.raises(RuntimeError, match="refusing to discard expired"):
+    with pytest.raises(
+        RuntimeError,
+        match="refusing to discard durable telemetry authority state",
+    ):
         command.downgrade(config, "0012")
     with closing(sqlite3.connect(database)) as connection:
-        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0013",)
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0015",)
 
 
 def test_delivery_migration_refuses_to_drop_nonempty_journal(tmp_path) -> None:
@@ -540,6 +551,7 @@ def test_ack_is_exactly_bound_and_cleans_members_only_after_commit(tmp_path) -> 
     ack = {
         "schemaVersion": "1.0",
         "installationId": _INSTALLATION_ID,
+        "installationRevision": 7,
         "credentialId": _CREDENTIAL_ID,
         "batchId": _BATCH_ID,
         "requestSha256": leased.request_sha256,
@@ -553,7 +565,7 @@ def test_ack_is_exactly_bound_and_cleans_members_only_after_commit(tmp_path) -> 
         "acceptedAt": "2030-01-01T12:02:01Z",
     }
     mismatched = dict(ack)
-    mismatched["credentialId"] = "66666666-6666-4666-8666-666666666666"
+    mismatched["installationRevision"] = 8
     with pytest.raises(TelemetryDeliveryError, match="invalid_ack"):
         journal.acknowledge(
             batch_id=_BATCH_ID,
@@ -668,6 +680,7 @@ def test_expired_lease_cannot_release_or_ack_batch(tmp_path) -> None:
     ack = {
         "schemaVersion": "1.0",
         "installationId": _INSTALLATION_ID,
+        "installationRevision": 7,
         "credentialId": _CREDENTIAL_ID,
         "batchId": _BATCH_ID,
         "requestSha256": pending.request_sha256,
@@ -846,6 +859,7 @@ def _ack_for(request_bytes: bytes) -> bytes:
         {
             "schemaVersion": "1.0",
             "installationId": document["installationId"],
+            "installationRevision": document["installationRevision"],
             "credentialId": document["credentialId"],
             "batchId": document["batchId"],
             "requestSha256": parsed.request_sha256,
@@ -1134,6 +1148,9 @@ def test_terminal_batch_is_quarantined_once_and_does_not_block_later_batch(
             TelemetryBatch(
                 batch_id=second_batch_id,
                 installation_id=first.installation_id,
+                installation_revision=first.installation_revision,
+                batch_authorization_revision=first.batch_authorization_revision,
+                journal_id=first.journal_id + 1,
                 credential_id=first.credential_id,
                 payload_sha256=first.payload_sha256,
                 request_sha256=parsed_second.request_sha256,
@@ -1236,7 +1253,10 @@ def test_quarantine_migration_refuses_downgrade_that_would_discard_terminal_batc
     config.set_main_option("sqlalchemy.url", f"sqlite:///{tmp_path / database_name}")
     config.attributes["explicit_database_url"] = True
 
-    with pytest.raises(RuntimeError, match="refusing to discard quarantined telemetry batches"):
+    with pytest.raises(
+        RuntimeError,
+        match="refusing to discard durable telemetry authority state",
+    ):
         command.downgrade(config, "0011")
 
 
@@ -1272,3 +1292,396 @@ def test_response_loss_retries_byte_identical_batch_and_commits_later_ack(tmp_pa
     with app.state.session() as session:
         batch = session.get(TelemetryBatch, _BATCH_ID)
         assert batch is not None and batch.status == "acked" and batch.attempt_count == 2
+
+
+def test_current_authority_v2_batch_and_ack_require_durable_activation(tmp_path) -> None:
+    import json
+    from pathlib import Path
+
+    from one_os_addon.telemetry_authority import TelemetryAuthorityManager
+    from one_os_addon.telemetry_contract_v2 import (
+        canonical_json as canonical_json_v2,
+    )
+    from one_os_addon.telemetry_contract_v2 import (
+        parse_telemetry_ack as parse_ack_v2,
+    )
+    from one_os_addon.telemetry_contract_v2 import (
+        parse_telemetry_batch as parse_batch_v2,
+    )
+    from one_os_addon.telemetry_delivery import TelemetryDeliveryJournal
+
+    app, spool = _pending_sample(tmp_path, "delivery-v2.db")
+    with app.state.session() as session:
+        batch = session.get(TelemetryBatch, _BATCH_ID)
+        session.delete(batch)
+        identity = session.get(EdgeIdentity, 1)
+        identity.certificate_sha256 = "s5-H8FWELCE6O7LgjcBTbUc6RyjNQp33u6Vk4NKCvv8"
+        identity.telemetry_authorization_revision = 7
+        session.commit()
+
+    vector_path = (
+        Path(__file__).resolve().parents[3] / "docs/reference/contracts/telemetry/v2/"
+        "one-os-phase2c-p-canonical-vectors-v2-draft4-20260825.json"
+    )
+    capability = json.loads(vector_path.read_text())["capability"]["canonicalUtf8"].encode()
+
+    class Client:
+        def get_capability(self, *_):
+            return capability
+
+        def enable(self, request_bytes, *_):
+            request = json.loads(request_bytes)
+            cap = json.loads(capability)
+            return canonical_json_v2(
+                {
+                    "protocol": "2.0",
+                    "requestId": request["requestId"],
+                    "installationId": request["installationId"],
+                    "status": "enabled",
+                    "protocolId": request["protocolId"],
+                    "telemetryBatchSchemaSha256": request["telemetryBatchSchemaSha256"],
+                    "telemetryAckSchemaSha256": request["telemetryAckSchemaSha256"],
+                    "telemetryErrorSchemaSha256": request["telemetryErrorSchemaSha256"],
+                    "renewalControlSchemaSha256": request["renewalControlSchemaSha256"],
+                    "capabilitySha256": request["capabilitySha256"],
+                    "capabilityServerNonce": request["capabilityServerNonce"],
+                    "issuedAt": cap["issuedAt"],
+                    "expiresAt": cap["expiresAt"],
+                    "telemetryAuthorizationRevision": 7,
+                    "enabledAt": "2030-01-01T12:00:30Z",
+                }
+            )
+
+    identity = _delivery_identity()
+    identity["certificateSha256"] = "s5-H8FWELCE6O7LgjcBTbUc6RyjNQp33u6Vk4NKCvv8"
+    authority = TelemetryAuthorityManager(
+        app.state.session,
+        Client(),
+        lambda: identity,
+        lambda _: b"s" * 64,
+        uuid_factory=lambda: "00000000-0000-4000-8000-00000000aaaa",
+        nonce_factory=lambda: b"z" * 32,
+        clock=lambda: datetime(2030, 1, 1, 12, 0, 30, tzinfo=UTC),
+    )
+    authority.activate()
+    journal = TelemetryDeliveryJournal(
+        app.state.session,
+        spool,
+        authority_manager=authority,
+        uuid_factory=lambda: _BATCH_ID,
+        clock=lambda: datetime(2030, 1, 1, 12, 1, tzinfo=UTC),
+    )
+    pending = journal.get_or_create_pending()
+    assert pending is not None and pending.protocol == "2.0"
+    parsed = parse_batch_v2(pending.request_bytes)
+    assert parsed.document["batchAuthorizationRevision"] == 7
+    assert "installationRevision" not in parsed.document
+
+    leased = journal.acquire(owner="worker-v2", lease_for=timedelta(seconds=30))
+    assert leased is not None
+    journal.mark_current_attempt(batch_id=leased.batch_id, owner="worker-v2")
+    with app.state.session() as session:
+        durable = session.get(TelemetryBatch, leased.batch_id)
+        assert durable.current_attempt_request_sha256 == parsed.request_sha256
+        assert durable.current_attempt_authorization_revision == 7
+        assert durable.current_attempt_at is not None
+    ack = canonical_json_v2(
+        {
+            "schemaVersion": "one-os-telemetry-ack/v2",
+            "authorizationMode": "current",
+            "installationId": _INSTALLATION_ID,
+            "credentialId": _CREDENTIAL_ID,
+            "batchId": _BATCH_ID,
+            "batchAuthorizationRevision": 7,
+            "ingestAuthorizationRevision": 7,
+            "requestSha256": parsed.request_sha256,
+            "acceptedSamples": 1,
+            "duplicateSamples": 0,
+            "acceptedQualityEvents": 0,
+            "duplicateQualityEvents": 0,
+            "acceptedGaps": 0,
+            "duplicateGaps": 0,
+            "ingestCursor": 1,
+            "acceptedAt": "2030-01-01T12:01:01Z",
+        }
+    )
+    parse_ack_v2(
+        ack,
+        expected_batch=parsed.document,
+        expected_request_sha256=parsed.request_sha256,
+        expected_ingest_authorization_revision=7,
+        previous_ingest_cursor=-1,
+    )
+    result = journal.acknowledge(batch_id=leased.batch_id, owner="worker-v2", ack_bytes=ack)
+    assert result["authorizationMode"] == "current"
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "outbox_capacity",
+        "retention_expired",
+        "storage_failure",
+        "clock_discontinuity",
+        "operator_reset",
+    ],
+)
+def test_v2_gap_projection_closes_v1_reason_lexicon(reason) -> None:
+    from one_os_addon.telemetry_delivery import _v2_record
+
+    projected = _v2_record(
+        {
+            "detectedAt": "2030-01-01T12:00:00Z",
+            "reason": reason,
+        }
+    )
+
+    assert projected == {
+        "detectedAt": "2030-01-01T12:00:00.000Z",
+        "reason": "storage_failure",
+    }
+
+
+def test_v2_static_activation_conflict_fails_closed_to_no_new_protocol_mix(tmp_path) -> None:
+    from one_os_addon.telemetry_delivery import TelemetryDeliveryJournal
+
+    app, spool = _pending_sample(tmp_path, "delivery-v2-conflict.db")
+    with app.state.session() as session:
+        row = session.get(TelemetryBatch, _BATCH_ID)
+        assert row is not None
+        row.request_bytes = row.request_bytes.replace(
+            b'"schemaVersion":"1.0"', b'"schemaVersion":"one-os-telemetry-batch/v2"'
+        )
+        session.commit()
+    journal = TelemetryDeliveryJournal(app.state.session, spool)
+    with pytest.raises(TelemetryDeliveryError, match="stored_batch_protocol_conflict"):
+        journal.get_or_create_pending()
+
+
+def test_stale_v2_activation_fails_before_batch_mutation_without_v1_downgrade(tmp_path) -> None:
+    from one_os_addon.models import TelemetryJournalState
+    from one_os_addon.telemetry_authority import TelemetryAuthorityError
+    from one_os_addon.telemetry_delivery import TelemetryDeliveryJournal
+    from sqlalchemy import func, select
+
+    app = create_app(
+        database_url=f"sqlite:///{tmp_path / 'stale-activation.db'}", pairing_backend=False
+    )
+
+    class StaleAuthority:
+        def enabled_revision(self):
+            raise TelemetryAuthorityError("durable_activation_conflict")
+
+    with app.state.session() as session:
+        before = (
+            session.get(TelemetryJournalState, 1).last_journal_id,
+            session.scalar(select(func.count()).select_from(TelemetryBatch)),
+        )
+
+    journal = TelemetryDeliveryJournal(
+        app.state.session,
+        tmp_path / "spool",
+        authority_manager=StaleAuthority(),
+    )
+    with pytest.raises(TelemetryDeliveryError, match="activation_state_conflict"):
+        journal.get_or_create_pending()
+
+    with app.state.session() as session:
+        after = (
+            session.get(TelemetryJournalState, 1).last_journal_id,
+            session.scalar(select(func.count()).select_from(TelemetryBatch)),
+        )
+    assert after == before
+
+
+def test_historical_ack_requires_exact_durable_receipt_hash(tmp_path) -> None:
+    import json
+    from pathlib import Path
+
+    from one_os_addon.models import TelemetryJournalState
+    from one_os_addon.telemetry_authority_cut import TelemetryAuthorityCutRepository
+    from one_os_addon.telemetry_contract_v2 import canonical_json as canonical_json_v2
+    from one_os_addon.telemetry_contract_v2 import parse_telemetry_batch as parse_batch_v2
+    from one_os_addon.telemetry_delivery import TelemetryDeliveryJournal
+
+    app = create_app(database_url=f"sqlite:///{tmp_path / 'historical.db'}", pairing_backend=False)
+    spool = tmp_path / "spool"
+    vector_path = (
+        Path(__file__).resolve().parents[3] / "docs/reference/contracts/telemetry/v2/"
+        "one-os-phase2c-p-canonical-vectors-v2-draft4-20260825.json"
+    )
+    vector = json.loads(vector_path.read_text())
+    request = vector["telemetryBatches256"][0]["canonicalUtf8"].encode()
+    parsed = parse_batch_v2(request)
+    operation_id = "55555555-5555-4555-8555-555555555555"
+    cut_id = "66666666-6666-4666-8666-666666666666"
+    pending_id = "77777777-7777-4777-8777-777777777777"
+    now = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
+    with app.state.session() as session:
+        identity = session.get(EdgeIdentity, 1)
+        identity.installation_id = parsed.document["installationId"]
+        identity.lineage_id = parsed.document["credentialId"]
+        identity.status = "paired"
+        identity.credential_id = parsed.document["credentialId"]
+        identity.installation_revision = 5
+        identity.telemetry_authorization_revision = 7
+        session.add(
+            Site(
+                id="historical-site",
+                installation_id=parsed.document["installationId"],
+                name="Historical delivery fixture",
+            )
+        )
+        session.get(TelemetryJournalState, 1).last_journal_id = 1
+        session.add(
+            TelemetryBatch(
+                batch_id=parsed.document["batchId"],
+                installation_id=parsed.document["installationId"],
+                installation_revision=5,
+                batch_authorization_revision=7,
+                journal_id=1,
+                credential_id=parsed.document["credentialId"],
+                payload_sha256=parsed.payload_sha256,
+                request_sha256=parsed.request_sha256,
+                request_bytes=request,
+                sample_count=1,
+                quality_event_count=0,
+                gap_count=0,
+                status="pending",
+                lease_owner=None,
+                lease_until=None,
+                attempt_count=0,
+                last_attempt_at=None,
+                next_attempt_at=None,
+                ack_bytes=None,
+                ingest_cursor=None,
+                acked_at=None,
+                created_at=now,
+            )
+        )
+        session.commit()
+        lineage_id = identity.lineage_id
+    entry = {
+        "batchAuthorizationRevision": 7,
+        "batchId": parsed.document["batchId"],
+        "credentialId": parsed.document["credentialId"],
+        "journalId": 1,
+        "requestLength": len(request),
+        "requestSha256": parsed.request_sha256,
+    }
+    manifest = {
+        "batchAuthorizationRevision": 7,
+        "createdAt": "2030-01-01T12:00:00Z",
+        "cutJournalMaxId": 1,
+        "cutMarkerId": cut_id,
+        "entries": [entry],
+        "entryCount": 1,
+        "firstJournalId": 1,
+        "installationId": parsed.document["installationId"],
+        "lastJournalId": 1,
+        "lineageId": lineage_id,
+        "renewalOperationId": operation_id,
+        "schemaVersion": "one-os-telemetry-backlog-manifest/v2",
+        "totalRequestBytes": len(request),
+    }
+    manifest_bytes = canonical_json_v2(manifest)
+    receipt = {
+        "allowedTransportCredentialIds": sorted([parsed.document["credentialId"], pending_id]),
+        "backlogManifestSha256": _b64digest(manifest_bytes),
+        "cutJournalMaxId": 1,
+        "cutMarkerId": cut_id,
+        "entries": [entry],
+        "entryCount": 1,
+        "expiresAt": "2030-01-02T12:00:00Z",
+        "historicalAuthorizationRevision": 7,
+        "ingestAuthorizationRevision": 8,
+        "installationId": parsed.document["installationId"],
+        "lineageId": lineage_id,
+        "notBefore": "2030-01-01T12:00:00Z",
+        "receiptNonce": "4" * 64,
+        "renewalOperationId": operation_id,
+        "renewalRequestSha256": "A" * 43,
+        "schemaVersion": "one-os-historical-authorization-receipt/v2",
+        "totalRequestBytes": len(request),
+    }
+    cuts = TelemetryAuthorityCutRepository(app.state.session)
+    cuts.open(cut_id, operation_id, manifest_bytes, 1, now)
+    cuts.store_receipt(cut_id, receipt, now)
+    receipt_hash = _b64digest(canonical_json_v2(receipt))
+    journal = TelemetryDeliveryJournal(app.state.session, spool, clock=lambda: now)
+    leased = journal.acquire(owner="historical", lease_for=timedelta(seconds=30))
+    assert leased is not None and leased.historical_receipt_sha256 == receipt_hash
+
+    def ack(receipt_sha: str) -> bytes:
+        return canonical_json_v2(
+            {
+                "schemaVersion": "one-os-telemetry-ack/v2",
+                "authorizationMode": "historical_backlog",
+                "installationId": parsed.document["installationId"],
+                "credentialId": parsed.document["credentialId"],
+                "batchId": parsed.document["batchId"],
+                "batchAuthorizationRevision": 7,
+                "ingestAuthorizationRevision": 8,
+                "requestSha256": parsed.request_sha256,
+                "historicalAuthorizationReceiptSha256": receipt_sha,
+                "acceptedSamples": 1,
+                "duplicateSamples": 0,
+                "acceptedQualityEvents": 0,
+                "duplicateQualityEvents": 0,
+                "acceptedGaps": 0,
+                "duplicateGaps": 0,
+                "ingestCursor": 1,
+                "acceptedAt": "2030-01-01T12:00:01Z",
+            }
+        )
+
+    with pytest.raises(TelemetryDeliveryError, match="invalid_ack"):
+        journal.acknowledge(batch_id=leased.batch_id, owner="historical", ack_bytes=ack("B" * 43))
+
+    current_ack = canonical_json_v2(
+        {
+            "schemaVersion": "one-os-telemetry-ack/v2",
+            "authorizationMode": "current",
+            "installationId": parsed.document["installationId"],
+            "credentialId": parsed.document["credentialId"],
+            "batchId": parsed.document["batchId"],
+            "batchAuthorizationRevision": 7,
+            "ingestAuthorizationRevision": 7,
+            "requestSha256": parsed.request_sha256,
+            "acceptedSamples": 1,
+            "duplicateSamples": 0,
+            "acceptedQualityEvents": 0,
+            "duplicateQualityEvents": 0,
+            "acceptedGaps": 0,
+            "duplicateGaps": 0,
+            "ingestCursor": 1,
+            "acceptedAt": "2030-01-01T12:00:01Z",
+        }
+    )
+    with pytest.raises(TelemetryDeliveryError, match="invalid_ack"):
+        journal.acknowledge(
+            batch_id=leased.batch_id,
+            owner="historical",
+            ack_bytes=current_ack,
+        )
+    with app.state.session() as session:
+        durable = session.get(TelemetryBatch, leased.batch_id)
+        assert durable.status == "leased"
+        durable.current_attempt_request_sha256 = durable.request_sha256
+        durable.current_attempt_authorization_revision = durable.batch_authorization_revision
+        durable.current_attempt_at = now - timedelta(minutes=1)
+        session.commit()
+
+    restarted = TelemetryDeliveryJournal(app.state.session, spool, clock=lambda: now)
+    assert (
+        restarted.acknowledge(
+            batch_id=leased.batch_id,
+            owner="historical",
+            ack_bytes=current_ack,
+        )["authorizationMode"]
+        == "current"
+    )
+    with app.state.session() as session:
+        assert session.get(TelemetryBatch, leased.batch_id).status == "acked"
+    with pytest.raises(TelemetryDeliveryError, match="renewal_cut_blocks_batch_formation"):
+        restarted.get_or_create_pending()

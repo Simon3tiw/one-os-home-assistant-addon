@@ -401,6 +401,7 @@ def parse_telemetry_batch(raw: bytes) -> ParsedTelemetryBatch:
         "schemaVersion",
         "batchId",
         "installationId",
+        "installationRevision",
         "credentialId",
         "createdAt",
         "payloadSha256",
@@ -413,6 +414,7 @@ def parse_telemetry_batch(raw: bytes) -> ParsedTelemetryBatch:
         _fail("invalid_schema_version", "Batch schemaVersion must be 1.0")
     _uuid4(document["batchId"])
     installation_id = _uuid4(document["installationId"])
+    _strict_int(document["installationRevision"])
     _uuid4(document["credentialId"])
     created_at = _timestamp(document["createdAt"])
     _digest(document["payloadSha256"])
@@ -475,7 +477,9 @@ def parse_telemetry_batch(raw: bytes) -> ParsedTelemetryBatch:
     if len(streams) > MAX_STREAMS:
         _fail("too_many_streams", "Batch exceeds stream cardinality")
 
-    payload = {key: document[key] for key in ("gaps", "qualityEvents", "samples")}
+    payload = {
+        key: document[key] for key in ("gaps", "installationRevision", "qualityEvents", "samples")
+    }
     payload_sha256 = _b64digest(_PAYLOAD_DOMAIN + canonical_json(payload))
     if not hmac.compare_digest(payload_sha256, document["payloadSha256"]):
         _fail("payload_digest_mismatch", "Batch payload digest mismatch")
@@ -490,6 +494,7 @@ def parse_telemetry_batch(raw: bytes) -> ParsedTelemetryBatch:
 _ACK_FIELDS = {
     "schemaVersion",
     "installationId",
+    "installationRevision",
     "credentialId",
     "batchId",
     "requestSha256",
@@ -526,12 +531,13 @@ def parse_telemetry_ack(
         "acceptedGaps",
         "duplicateGaps",
         "ingestCursor",
+        "installationRevision",
     ):
         _strict_int(document[key])
     _timestamp(document["acceptedAt"])
     if any(
         document[key] != expected_batch[key]
-        for key in ("installationId", "credentialId", "batchId")
+        for key in ("installationId", "installationRevision", "credentialId", "batchId")
     ) or not hmac.compare_digest(document["requestSha256"], expected_request_sha256):
         _fail("ack_binding_mismatch", "ACK does not bind the exact request")
     count_pairs = (
