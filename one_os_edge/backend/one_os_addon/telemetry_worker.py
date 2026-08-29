@@ -11,7 +11,16 @@ from .telemetry_transport import TelemetryTransportError
 
 
 class UploadTransport(Protocol):
-    def upload(self, request_bytes: bytes, certificate_pem: str, private_key_pem: str) -> bytes: ...
+    def upload(
+        self,
+        request_bytes: bytes,
+        certificate_pem: str,
+        private_key_pem: str,
+        *,
+        protocol: str = "1.0",
+        authorization_mode: str = "current",
+        historical_receipt_sha256: str | None = None,
+    ) -> bytes: ...
 
 
 class TelemetryDeliveryWorker:
@@ -134,11 +143,30 @@ class TelemetryDeliveryWorker:
             self.last_error = None
             return "idle"
         try:
-            ack_bytes = self.transport.upload(
-                batch.request_bytes,
-                identity["certificatePem"],
-                identity["privateKeyPem"],
-            )
+            if batch.protocol == "2.0":
+                if batch.historical_receipt_sha256 is not None:
+                    ack_bytes = self.transport.upload(
+                        batch.request_bytes,
+                        identity["certificatePem"],
+                        identity["privateKeyPem"],
+                        protocol="2.0",
+                        authorization_mode="historical_backlog",
+                        historical_receipt_sha256=batch.historical_receipt_sha256,
+                    )
+                else:
+                    self.journal.mark_current_attempt(batch_id=batch.batch_id, owner=self.owner)
+                    ack_bytes = self.transport.upload(
+                        batch.request_bytes,
+                        identity["certificatePem"],
+                        identity["privateKeyPem"],
+                        protocol="2.0",
+                    )
+            else:
+                ack_bytes = self.transport.upload(
+                    batch.request_bytes,
+                    identity["certificatePem"],
+                    identity["privateKeyPem"],
+                )
             self.journal.acknowledge(
                 batch_id=batch.batch_id,
                 owner=self.owner,

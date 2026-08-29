@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from one_os_addon.app import create_app
 from one_os_addon.configuration_snapshot import (
     ConfigurationSnapshotRepository,
     ConfigurationSnapshotSync,
     ConfigurationSyncError,
+    SnapshotProjectionError,
     build_selected_projection,
     canonical_projection,
 )
@@ -303,6 +305,21 @@ def test_unchanged_projection_does_not_allocate_new_version_and_change_waits_for
     assert b"Changed while pending" in second.payload
     repository.ack(second.snapshot_id)
     assert repository.prepare(installation_id) is None
+    app.state.engine.dispose()
+
+
+def test_configuration_version_stops_before_signed_int64_overflow(tmp_path: Path) -> None:
+    app, repository, installation_id = _prepared_repository(tmp_path)
+    first = repository.prepare(installation_id)
+    assert first is not None
+    repository.ack(first.snapshot_id)
+    with app.state.session() as session:
+        session.get(ConfigurationSnapshot, first.snapshot_id).config_version = 9223372036854775807
+        session.get(Point, "point-z").display_name = "Requires a new version"
+        session.commit()
+
+    with pytest.raises(SnapshotProjectionError, match="config_version_exhausted"):
+        repository.prepare(installation_id)
     app.state.engine.dispose()
 
 

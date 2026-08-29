@@ -2,11 +2,11 @@
   "artifacts": {
     "README.md": "dabb489ed1ee071b47bd8d73d14f3312a4259f06d68c61cc09709bc398b79c20",
     "THREAT-MODEL.md": "a80a9d2f9b73acec66129d64beb4ec60b6438d4f93cc9d920195ad18f73f4170",
-    "canonical-vectors.json": "033141d95b703db86b5dafe49d405442c74cc7de05d50c85c60a5b8ea935a9cb",
+    "canonical-vectors.json": "339c72afbec3a423185779632c8fb495066c7409b117721f430fe3435c69b49e",
     "raw-negative-vectors.json": "bcc50dedc21ffe7c4320f9d18c0c3b4a579f3b4200f1b273a69ed0350dc2a688",
-    "semantic-vectors.json": "477c68bfc7fced0323098e9431709cb35219e28b10772052e6a3a29411d3c7f3",
-    "telemetry-ack-v1.schema.json": "bb0434720e8194c91480a77b99c546a26c601b44e58e642a3fb2aeb6e927ed35",
-    "telemetry-batch-v1.schema.json": "9f89c05bbe6015df63a4722c6feca7e7a4dde8d49eac497ff54ce5ec5ac81b23",
+    "semantic-vectors.json": "d5ed12258b0fca61c20ba3db74a0df7886edb5938006cdcfd58246930e65e291",
+    "telemetry-ack-v1.schema.json": "2392a6999e38ce60f65366cbf1070100f4828c2b78e69a279d664d708aeea37b",
+    "telemetry-batch-v1.schema.json": "f6175fba41518d3221d4f04927306cd750fcf0a6c19bc1932b69c7478d2e01a7",
     "telemetry-gap-v1.schema.json": "1ff0d2936d4e84b2e21b6526fcd0dabe4db9530dca35c686b22877aa34dde695",
     "telemetry-quality-event-v1.schema.json": "ff5eb21b29d16095fdf6dd4801e348b6197bc6d3c7cb7420d51153af7967e791",
     "telemetry-sample-v1.schema.json": "beb2a7325d60579a3a5407736666e975b6fb8d100121e264d06c1a087c542cd0"

@@ -1,0 +1,6 @@
+#!/usr/bin/with-contenv sh
+set -eu
+if [ "$(python3 -c 'from pathlib import Path; from one_os_addon.addon_options import addon_options_from_path; print("true" if addon_options_from_path(Path("/data/options.json")).soak_probe_enabled else "false")')" != "true" ]; then
+  exec sleep infinity
+fi
+exec python3 -I -m one_os_addon.soak_probe_main

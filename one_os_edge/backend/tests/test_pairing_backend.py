@@ -434,6 +434,68 @@ def test_transport_revocation_is_fenced_by_credential_and_revision(tmp_path) -> 
     assert state["status"] == "revoked"
 
 
+@pytest.mark.parametrize(
+    ("operation", "expected_reason"),
+    (("repair", "repair"), ("replacement", "replacement")),
+)
+def test_repair_and_replacement_terminalize_v2_before_pairing_mutation(
+    tmp_path, operation: str, expected_reason: str
+) -> None:
+    backend, state = _completed_pairing(tmp_path)
+    before = dict(state)
+
+    class FailingTerminator:
+        reasons = []
+
+        def terminalize(self, reason):
+            self.reasons.append(reason)
+            raise RuntimeError("injected terminalization failure")
+
+    terminator = FailingTerminator()
+    backend.attach_renewal_v2_terminator(terminator)
+    with pytest.raises(PairingError, match="renewal_v2_terminalization_failed"):
+        if operation == "repair":
+            backend.start("repair", state["installationId"])
+        else:
+            backend.rotate_key()
+
+    assert terminator.reasons == [expected_reason]
+    assert state == before
+    assert backend.store.read_transient() is None
+
+
+def test_transport_revoke_terminalizes_v2_before_revoked_state(tmp_path) -> None:
+    backend, state = _completed_pairing(tmp_path)
+    old_credential = state["credentialId"]
+
+    class Terminator:
+        observations = []
+
+        def terminalize(self, reason):
+            self.observations.append((reason, state["status"]))
+
+    terminator = Terminator()
+    backend.attach_renewal_v2_terminator(terminator)
+    assert backend.mark_transport_revoked(old_credential, 12) is True
+    assert terminator.observations == [("revoke", "paired")]
+    assert state["status"] == "revoked"
+
+
+def test_transport_revocation_terminalization_failure_preserves_pairing_state(tmp_path) -> None:
+    backend, state = _completed_pairing(tmp_path)
+    old_credential = state["credentialId"]
+    before = dict(state)
+
+    class FailingTerminator:
+        def terminalize(self, _reason):
+            raise RuntimeError("injected terminalization failure")
+
+    backend.attach_renewal_v2_terminator(FailingTerminator())
+    with pytest.raises(PairingError, match="renewal_v2_terminalization_failed"):
+        backend.mark_transport_revoked(old_credential, 12)
+    assert state == before
+
+
 def test_issued_result_response_loss_retries_without_losing_or_duplicating_candidate(
     tmp_path,
 ) -> None:
