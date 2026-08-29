@@ -73,15 +73,30 @@ De doelstructuur moet zijn:
 
 ## 5. Updaten
 
-Herhaal stap 1–3 met een nieuwe bundel: overschrijf de map
-`/addons/one_os_edge/`, vernieuw de add-on store en herinstalleer/herstart
-de app. Bestaande data in `/data` (SQLite-database, overrides, audit)
-blijft behouden zolang die map niet wordt verwijderd.
+Een upgrade vanaf `0.3.0` is een blocking, fail-closed datamigratie:
+
+1. Stop de bestaande ONE.OS Edge Connector-add-on. Laat hem gestopt tot de
+   nieuwe bytes volledig in `/addons/one_os_edge/` staan.
+2. Maak via Home Assistant een verse back-up van de gestopte add-ondata. De
+   private `identity/`-map is bewust uitgesloten en verlaat het apparaat niet;
+   verwijder of overschrijf `/data` daarom nooit tijdens de upgrade.
+3. Overschrijf de add-onmap met de geverifieerde nieuwe bundel en vernieuw de
+   add-on store. Controleer vóór starten dat de getoonde versie de bedoelde
+   release is.
+4. Start de add-on één keer. Vóór enige databasepublicatie valideert de runtime
+   de private identity cross-store tegen de publieke SQLite-state. Bij mismatch
+   weigert startup fail-closed en blijft de brondatabase ongewijzigd: niet
+   opnieuw proberen, `/data` niet verwijderen en eerst de logs veiligstellen.
+5. Beschouw de upgrade pas als geslaagd nadat `/health` groen is en diagnostiek
+   databaseRevision `0021` rapporteert.
+
+Bestaande data in `/data` (SQLite-database, overrides en audit) blijft behouden
+zolang die map niet wordt verwijderd.
 
 ## 6. Verifiëren na installatie
 
 - `/health`-endpoint van de add-on retourneert `{"status":"ok"}` via het
   Supervisor-proxypad.
 - Het paneel toont "SYSTEEMOVERZICHT" met live tellingen na "Nu ontdekken".
-- Diagnostiek-tabblad toont `databaseRevision: 0002` en een gevulde
+- Diagnostiek-tabblad toont `"databaseRevision": "0021"` en een gevulde
   auditlog na de eerste commissioning-actie.

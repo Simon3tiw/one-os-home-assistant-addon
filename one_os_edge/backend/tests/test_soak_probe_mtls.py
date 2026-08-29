@@ -171,7 +171,7 @@ def test_real_mtls_handshake_closed_route_and_no_client_rejected(tmp_path: Path)
         wrong_key,
     ) = fixtures(tmp_path)
     payload = {
-        "softwareVersion": "0.4.0",
+        "softwareVersion": "0.4.1",
         "databaseRevision": "0014",
         "telemetryDelivery": {
             "pending": 0,
@@ -202,7 +202,7 @@ def test_real_mtls_handshake_closed_route_and_no_client_rejected(tmp_path: Path)
         assert body == (
             b'{"databaseRevision":"0014","observedAt":"2026-08-17T13:20:25Z",'
             b'"probeNonce":"1111111111111111111111111111111111111111111111111111111111111111",'
-            b'"processStartId":"22222222222222222222222222222222","softwareVersion":"0.4.0",'
+            b'"processStartId":"22222222222222222222222222222222","softwareVersion":"0.4.1",'
             b'"telemetryDelivery":{"acked":1,"leased":0,"oldestQuarantine":null,'
             b'"pending":0,"quarantined":0}}\n'
         )
@@ -285,7 +285,7 @@ def test_slow_tls_handshake_is_closed_at_total_deadline(tmp_path: Path) -> None:
         _wrong_key,
     ) = fixtures(tmp_path)
     payload = {
-        "softwareVersion": "0.4.0",
+        "softwareVersion": "0.4.1",
         "databaseRevision": "0014",
         "telemetryDelivery": {
             "pending": 0,

@@ -1,5 +1,5 @@
 name: ONE.OS Edge Connector
-version: "0.4.0"
+version: "0.4.1"
 slug: one_os_edge
 description: Secure ONE.OS pairing, configuration sync and default-off Telemetry v1
 url: https://github.com/Simon3tiw/one-os-home-assistant-addon

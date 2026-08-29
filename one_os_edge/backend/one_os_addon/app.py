@@ -34,6 +34,7 @@ from .central_pairing_client import CentralPairingHTTPClient, PairingRequestGate
 from .configuration_snapshot import ConfigurationSnapshotRepository, ConfigurationSnapshotSync
 from .ha.client import HomeAssistantReadOnlyClient
 from .ha.fake import IncompatibleHomeAssistant, UnavailableHomeAssistant
+from .legacy_upgrade import upgrade_legacy_sqlite
 from .models import (
     Asset,
     Audit,
@@ -202,7 +203,7 @@ def is_valid_web_origin(value: str) -> bool:
     )
 
 
-def migrate_database(database_url: str) -> None:
+def migrate_database(database_url: str, identity_dir: Path | None = None) -> None:
     configured = os.getenv("ALEMBIC_CONFIG")
     candidates = [
         Path(configured) if configured else None,
@@ -216,6 +217,8 @@ def migrate_database(database_url: str) -> None:
     config = Config(str(config_path))
     config.set_main_option("sqlalchemy.url", database_url)
     config.attributes["explicit_database_url"] = True
+    if upgrade_legacy_sqlite(database_url, config_path, identity_dir):
+        return
     command.upgrade(config, "head")
 
 
@@ -505,10 +508,13 @@ def create_app(
     ):
         raise ValueError("telemetry authority requires built-in telemetry and pairing runtimes")
     app = FastAPI(
-        title="ONE.OS commissioning API", version="1.0.0", root_path=os.getenv("INGRESS_PATH", "")
+        title="ONE.OS commissioning API",
+        version=RELEASE_VERSION,
+        root_path=os.getenv("INGRESS_PATH", ""),
     )
     url = database_url or os.getenv("DATABASE_URL", "sqlite:////tmp/one-os-commissioning.db")
-    migrate_database(url)
+    identity_root = Path(identity_dir or os.getenv("IDENTITY_DIR", "/data/identity"))
+    migrate_database(url, identity_root)
     engine = create_engine(
         url,
         connect_args={"check_same_thread": False, "timeout": 5} if url.startswith("sqlite") else {},
@@ -524,7 +530,7 @@ def create_app(
             cur.close()
 
     app.state.session = sessionmaker(engine, expire_on_commit=False)
-    app.state.identity_dir = Path(identity_dir or os.getenv("IDENTITY_DIR", "/data/identity"))
+    app.state.identity_dir = identity_root
     app.state.pairing = None
     app.state.pairing_worker = None
     app.state.configuration_snapshot_repository = ConfigurationSnapshotRepository(app.state.session)

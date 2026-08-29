@@ -32,7 +32,7 @@ def test_collects_exact_public_projection_from_read_only_sqlite(tmp_path: Path) 
     database(path)
     result = collect_status(path)
     assert result == {
-        "softwareVersion": "0.4.0",
+        "softwareVersion": "0.4.1",
         "databaseRevision": "0021",
         "telemetryDelivery": {
             "pending": 1,
