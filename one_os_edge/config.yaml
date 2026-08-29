@@ -1,5 +1,5 @@
 name: ONE.OS Edge Connector
-version: "0.4.1"
+version: "0.4.2"
 slug: one_os_edge
 description: Secure ONE.OS pairing, configuration sync and default-off Telemetry v1
 url: https://github.com/Simon3tiw/one-os-home-assistant-addon
@@ -17,10 +17,12 @@ options:
   telemetry_enabled: false
   telemetry_authority_enabled: false
   soak_probe_enabled: false
+  identity_recovery_authorized: false
 schema:
   telemetry_enabled: bool
   telemetry_authority_enabled: bool
   soak_probe_enabled: bool
+  identity_recovery_authorized: bool
 ports:
   9443/tcp: null
 ports_description:

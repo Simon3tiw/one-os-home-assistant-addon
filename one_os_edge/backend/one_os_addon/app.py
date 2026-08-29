@@ -203,7 +203,11 @@ def is_valid_web_origin(value: str) -> bool:
     )
 
 
-def migrate_database(database_url: str, identity_dir: Path | None = None) -> None:
+def migrate_database(
+    database_url: str,
+    identity_dir: Path | None = None,
+    identity_recovery_authorized: bool = False,
+) -> None:
     configured = os.getenv("ALEMBIC_CONFIG")
     candidates = [
         Path(configured) if configured else None,
@@ -217,7 +221,12 @@ def migrate_database(database_url: str, identity_dir: Path | None = None) -> Non
     config = Config(str(config_path))
     config.set_main_option("sqlalchemy.url", database_url)
     config.attributes["explicit_database_url"] = True
-    if upgrade_legacy_sqlite(database_url, config_path, identity_dir):
+    if upgrade_legacy_sqlite(
+        database_url,
+        config_path,
+        identity_dir,
+        identity_recovery_authorized=identity_recovery_authorized,
+    ):
         return
     command.upgrade(config, "head")
 
@@ -500,6 +509,7 @@ def create_app(
     telemetry_spool_dir=None,
     telemetry_worker=None,
     telemetry_authority_enabled=False,
+    identity_recovery_authorized=False,
 ):
     if telemetry_worker is not None and not telemetry_enabled:
         raise ValueError("telemetry worker requires telemetry feature flag")
@@ -514,7 +524,11 @@ def create_app(
     )
     url = database_url or os.getenv("DATABASE_URL", "sqlite:////tmp/one-os-commissioning.db")
     identity_root = Path(identity_dir or os.getenv("IDENTITY_DIR", "/data/identity"))
-    migrate_database(url, identity_root)
+    migrate_database(
+        url,
+        identity_root,
+        identity_recovery_authorized=identity_recovery_authorized,
+    )
     engine = create_engine(
         url,
         connect_args={"check_same_thread": False, "timeout": 5} if url.startswith("sqlite") else {},
@@ -1618,5 +1632,8 @@ app = create_app(
     telemetry_enabled=os.getenv("ONE_OS_TELEMETRY_ENABLED", "false").strip().lower() == "true",
     telemetry_authority_enabled=(
         os.getenv("ONE_OS_TELEMETRY_AUTHORITY_ENABLED", "false").strip().lower() == "true"
+    ),
+    identity_recovery_authorized=(
+        os.getenv("ONE_OS_IDENTITY_RECOVERY_AUTHORIZED", "false").strip().lower() == "true"
     ),
 )

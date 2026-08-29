@@ -12,7 +12,7 @@ cd one_os_edge/frontend && npm ci && npm test && npm run typecheck && npm run li
 npm audit --omit=dev --audit-level=high
 ```
 
-Use a temporary SQLite URL for development. Runtime data is `/data/commissioning.db`; it is never committed. SQLite enables foreign keys, WAL and a 5-second busy timeout. Alembic owns schema revision `0002` (lifecycle, placement and typed properties on top of `0001`).
+Use a temporary SQLite URL for development. Runtime data is `/data/commissioning.db`; it is never committed. SQLite enables foreign keys, WAL and a 5-second busy timeout. Alembic owns schema revision `0021`; migrations remain linear from `0001` through that head.
 
 ## Isolated end-to-end test
 
@@ -48,7 +48,24 @@ See `INSTALL.md` for the full procedure.
 
 ## Cold backup/restore
 
-Stop the backend, checkpoint SQLite (`PRAGMA wal_checkpoint(TRUNCATE)`), verify integrity, archive only `/data/commissioning.db`, restore into a clean `/data`, then restart and let Alembic migrate to head automatically. `test_cold_backup_restore_preserves_complete_commissioning_state` exercises the full path: overrides, selection, a created Property, an Asset split and the audit log all survive the restore, and the restored database re-verifies at Alembic head. Telemetry outbox data belongs to Phase 2C and must remain physically separate and excluded from backup.
+Treat SQLite and the private `/data/identity/` tree as one cryptographic
+installation state. A database-only backup can prove preservation of public
+commissioning, audit and telemetry state, but it cannot restore a commissioned
+identity or justify a normal restart when the matching private key is absent.
+
+Before backup, stop the add-on and require a clean single-file SQLite source;
+never delete or ignore unexpected WAL/SHM sidecars. After restore, preserve all
+restored data and let startup fail closed on a missing cross-store identity. If
+the original private identity is unavailable, follow the section **“Expliciet identityherstel na een cold-backuprestore”** in
+`INSTALL.md`: use the default-off
+`identity_recovery_authorized` option exactly once, verify schema head `0021` and
+`unpaired`, disable the option immediately, then perform a completely new
+pairing. Never substitute a database wipe, manual key injection or loose SQL
+mutation.
+
+`test_cold_backup_restore_preserves_complete_commissioning_state` verifies only
+the database-state preservation contract; it does not claim that a database-only
+archive is a complete cryptographic installation backup.
 
 ## Security boundary
 

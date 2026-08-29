@@ -10,7 +10,7 @@ bundel hieronder.
 Op een machine met deze repository (lokaal of via een groene CI-run):
 
 ```bash
-./scripts/build-release-bundle.sh
+./scripts/build-release-bundle.sh "$PWD/dist-bundle"
 ```
 
 Dit levert:
@@ -32,14 +32,68 @@ bouwt dezelfde bundel automatisch bij elke groene run op `main` en
 ## 2. Bundel uitpakken op de Home Assistant-host
 
 Home Assistant OS/Supervised leest lokale apps/add-ons uit de map
-`/addons` (of het geconfigureerde `addons`-pad in `share`). Kopieer de
-uitgepakte `one_os_edge/`-map daarheen, bijvoorbeeld via Samba, SSH of
-de Home Assistant Terminal/SSH-add-on:
+`/addons` (of het geconfigureerde `addons`-pad in `share`). Gebruik voor zowel
+een eerste installatie als een update de checksummed bundle zelf als de
+overdrachtseenheid:
 
 ```bash
-tar -xzf one-os-edge-addon-bundle.tar.gz -C /tmp/one-os-staging
-scp -r /tmp/one-os-staging/one_os_edge root@homeassistant.local:/addons/one_os_edge
+set -euo pipefail
+bundle=dist-bundle/one-os-edge-addon-bundle.tar.gz
+checksum=dist-bundle/one-os-edge-addon-bundle.tar.gz.sha256
+(cd dist-bundle && sha256sum -c one-os-edge-addon-bundle.tar.gz.sha256)
+
+ssh root@homeassistant.local 'set -eu
+transfer=/addons/.one_os_edge.v042.transfer
+new=/addons/.one_os_edge.v042.new
+test ! -e "$transfer"
+test ! -e "$new"
+install -d -m 0700 "$transfer"'
+
+scp "$bundle" "$checksum" \
+  root@homeassistant.local:/addons/.one_os_edge.v042.transfer/
+
+ssh root@homeassistant.local 'set -eu
+transfer=/addons/.one_os_edge.v042.transfer
+new=/addons/.one_os_edge.v042.new
+cd "$transfer"
+sha256sum -c one-os-edge-addon-bundle.tar.gz.sha256
+tar -xzf one-os-edge-addon-bundle.tar.gz -C "$transfer"
+test -f "$transfer/one_os_edge/config.yaml"
+mv "$transfer/one_os_edge" "$new"
+rm -- one-os-edge-addon-bundle.tar.gz one-os-edge-addon-bundle.tar.gz.sha256 README.md INSTALL.md
+cd /addons
+rmdir "$transfer"'
+
+ssh root@homeassistant.local 'set -eu
+new=/addons/.one_os_edge.v042.new
+target=/addons/one_os_edge
+previous=/addons/.one_os_edge.v042.previous
+test -f "$new/config.yaml"
+if [ ! -e "$target" ] && [ -e "$previous" ]; then
+  mv "$previous" "$target"
+fi
+had_previous=false
+if [ -e "$target" ]; then
+  test ! -e "$previous"
+  mv "$target" "$previous"
+  had_previous=true
+fi
+if ! mv "$new" "$target"; then
+  if [ "$had_previous" = true ]; then
+    mv "$previous" "$target"
+  fi
+  exit 1
+fi'
 ```
+
+Deze procedure werkt zowel bij een afwezige target als bij een update. Een bestaande
+add-onsourcedirectory blijft na een geslaagde swap staan als
+`/addons/.one_os_edge.v042.previous`; verwijder die pas nadat installatie, startup en
+de verificaties uit sectie 6 zijn geslaagd. Als de verbinding of het proces tussen
+de twee finale renames wordt onderbroken, voer dan alleen het laatste `ssh`-blok
+opnieuw uit: het herstelt eerst `.previous`, valideert de reeds checksummed `.new`
+en herhaalt vervolgens de swap. De persistente add-ondata in `/data` wordt hierbij
+niet aangeraakt.
 
 De doelstructuur moet zijn:
 
@@ -92,6 +146,35 @@ Een upgrade vanaf `0.3.0` is een blocking, fail-closed datamigratie:
 
 Bestaande data in `/data` (SQLite-database, overrides en audit) blijft behouden
 zolang die map niet wordt verwijderd.
+
+### Expliciet identityherstel na een cold-backuprestore
+
+Gebruik dit uitsluitend wanneer startup exact `identity_missing_after_restore`
+rapporteert en de oorspronkelijke private identity aantoonbaar niet herstelbaar
+is. Dit is een operator-geautoriseerde identityrotatie, geen gewone upgrade:
+
+1. Houd de add-on gestopt en maak een verse cold backup.
+2. Controleer dat de te installeren release deze recoveryroute bevat.
+3. Zet in de add-onconfiguratie alleen `identity_recovery_authorized: true` en
+   laat telemetry-, telemetry-authority- en soakopties uit.
+4. Start één keer. De runtime accepteert uitsluitend exact revision `0009`, de
+   gesloten `identity_missing_after_restore`-shape, een afwezige/lege private
+   identitydirectory en een clean single-file SQLitebron zonder `-wal` of `-shm`.
+   Als sidecars aanwezig zijn, blijft de volledige databaseset ongewijzigd en
+   stopt recovery fail-closed; verwijder die bestanden niet handmatig maar stop,
+   maak een cold backup en diagnoseer de onschone shutdown. Elke andere afwijking
+   stopt eveneens vóór publicatie.
+5. Controleer `/health`, databaseRevision `0021`, identitystatus `unpaired` en
+   afwezigheid van oude pairingstate.
+6. Stop de add-on, zet `identity_recovery_authorized` onmiddellijk terug op
+   `false` en start opnieuw.
+7. Start daarna een volledig nieuwe initial pairing via de normale Ingress-UI.
+   Gebruik geen repair-mode: de oude Central-installationbinding bestaat niet
+   meer. Controleer na ACK de nieuwe credential-, certificaat-, SPKI-, tenant-
+   en sitebinding aan beide zijden.
+
+Verwijder nooit handmatig SQLite-, WAL-/SHM- of identitybestanden als alternatief
+voor deze route.
 
 ## 6. Verifiëren na installatie
 

@@ -8,6 +8,7 @@ import gzip
 import hashlib
 import os
 import tarfile
+import tempfile
 from pathlib import Path
 
 EXCLUDED_DIRECTORIES = {
@@ -41,7 +42,7 @@ def _mode(relative: Path, *, directory: bool) -> int:
 
 def _members(repository: Path) -> list[tuple[Path, Path]]:
     members: list[tuple[Path, Path]] = []
-    for relative_root in (Path("one_os_edge"), Path("README.md")):
+    for relative_root in (Path("one_os_edge"), Path("README.md"), Path("INSTALL.md")):
         root = repository / relative_root
         if not root.exists():
             raise RuntimeError(f"required bundle input is missing: {relative_root}")
@@ -60,9 +61,12 @@ def _members(repository: Path) -> list[tuple[Path, Path]]:
 
 def build(repository: Path, destination: Path) -> str:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = destination.with_name(f".{destination.name}.tmp-{os.getpid()}")
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=destination.parent, prefix=f".{destination.name}.", suffix=".tmp"
+    )
+    temporary = Path(temporary_name)
     try:
-        with temporary.open("wb") as raw:
+        with os.fdopen(descriptor, "wb") as raw:
             with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed:
                 with tarfile.open(
                     fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT
@@ -88,7 +92,18 @@ def build(repository: Path, destination: Path) -> str:
 
     digest = hashlib.sha256(destination.read_bytes()).hexdigest()
     checksum = destination.with_name(f"{destination.name}.sha256")
-    checksum.write_text(f"{digest}  {destination.name}\n", encoding="utf-8")
+    descriptor, temporary_name = tempfile.mkstemp(
+        dir=checksum.parent, prefix=f".{checksum.name}.", suffix=".tmp", text=True
+    )
+    temporary_checksum = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(f"{digest}  {destination.name}\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary_checksum, checksum)
+    finally:
+        temporary_checksum.unlink(missing_ok=True)
     return digest
 
 
@@ -97,7 +112,7 @@ def main() -> None:
     parser.add_argument("repository", type=Path)
     parser.add_argument("destination", type=Path)
     args = parser.parse_args()
-    print(build(args.repository.resolve(), args.destination.resolve()))
+    print(build(args.repository.resolve(), args.destination.absolute()))
 
 
 if __name__ == "__main__":

@@ -142,7 +142,7 @@ def test_diagnostics_is_allowlist_only_and_audit_is_safe(client, auth, fake_ha):
         "storage",
         "telemetryDelivery",
     }
-    assert diag.json()["softwareVersion"] == "0.4.1"
+    assert diag.json()["softwareVersion"] == "0.4.2"
     assert diag.json()["databaseRevision"] == "0021"
     assert diag.json()["telemetryDelivery"] == {
         "pending": 0,

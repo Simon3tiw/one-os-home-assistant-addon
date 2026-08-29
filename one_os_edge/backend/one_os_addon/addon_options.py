@@ -19,6 +19,7 @@ class AddonOptions:
     telemetry_enabled: bool = False
     telemetry_authority_enabled: bool = False
     soak_probe_enabled: bool = False
+    identity_recovery_authorized: bool = False
 
 
 def _closed_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -56,27 +57,47 @@ def addon_options_from_path(path: Path) -> AddonOptions:
         raise AddonOptionsError("invalid add-on options") from error
     if type(value) is not dict:
         raise AddonOptionsError("add-on options must be an object")
-    if set(value) - {"telemetry_enabled", "telemetry_authority_enabled", "soak_probe_enabled"}:
+    if set(value) - {
+        "telemetry_enabled",
+        "telemetry_authority_enabled",
+        "soak_probe_enabled",
+        "identity_recovery_authorized",
+    }:
         raise AddonOptionsError("unknown add-on option")
     telemetry_enabled = value.get("telemetry_enabled", False)
     telemetry_authority_enabled = value.get("telemetry_authority_enabled", False)
     soak_probe_enabled = value.get("soak_probe_enabled", False)
+    identity_recovery_authorized = value.get("identity_recovery_authorized", False)
     if type(telemetry_enabled) is not bool:
         raise AddonOptionsError("telemetry_enabled must be a boolean")
     if type(telemetry_authority_enabled) is not bool:
         raise AddonOptionsError("telemetry_authority_enabled must be a boolean")
     if type(soak_probe_enabled) is not bool:
         raise AddonOptionsError("soak_probe_enabled must be a boolean")
+    if type(identity_recovery_authorized) is not bool:
+        raise AddonOptionsError("identity_recovery_authorized must be a boolean")
+    if identity_recovery_authorized and (
+        telemetry_enabled or telemetry_authority_enabled or soak_probe_enabled
+    ):
+        raise AddonOptionsError(
+            "identity_recovery_authorized requires telemetry and soak modes disabled"
+        )
     return AddonOptions(
         telemetry_enabled=telemetry_enabled,
         telemetry_authority_enabled=telemetry_authority_enabled,
         soak_probe_enabled=soak_probe_enabled,
+        identity_recovery_authorized=identity_recovery_authorized,
     )
 
 
 def option_from_path(path: Path, name: str) -> bool:
     options = addon_options_from_path(path)
-    if name not in {"telemetry_enabled", "telemetry_authority_enabled", "soak_probe_enabled"}:
+    if name not in {
+        "telemetry_enabled",
+        "telemetry_authority_enabled",
+        "soak_probe_enabled",
+        "identity_recovery_authorized",
+    }:
         raise AddonOptionsError("unknown requested add-on option")
     return getattr(options, name)
 

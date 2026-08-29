@@ -88,3 +88,36 @@ def test_telemetry_authority_option_is_explicit_and_default_off(tmp_path: Path) 
     path = tmp_path / "options.json"
     path.write_text('{"telemetry_enabled":true,"telemetry_authority_enabled":true}')
     assert addon_options_from_path(path).telemetry_authority_enabled is True
+
+
+def test_identity_recovery_authorization_is_exact_boolean_and_default_off(tmp_path: Path) -> None:
+    assert addon_options_from_path(tmp_path / "missing.json").identity_recovery_authorized is False
+    path = tmp_path / "options.json"
+    path.write_text('{"identity_recovery_authorized":true}')
+    assert addon_options_from_path(path).identity_recovery_authorized is True
+
+
+@pytest.mark.parametrize(
+    "conflict",
+    ["telemetry_enabled", "telemetry_authority_enabled", "soak_probe_enabled"],
+)
+def test_identity_recovery_authorization_rejects_concurrent_runtime_modes(
+    tmp_path: Path, conflict: str
+) -> None:
+    path = tmp_path / "options.json"
+    path.write_text('{"identity_recovery_authorized":true,"' + conflict + '":true}')
+    with pytest.raises(
+        AddonOptionsError,
+        match="identity_recovery_authorized requires telemetry and soak modes disabled",
+    ):
+        addon_options_from_path(path)
+
+
+@pytest.mark.parametrize("value", [1, "true", None, [], {}])
+def test_invalid_identity_recovery_authorization_fails_closed(value, tmp_path: Path) -> None:
+    import json
+
+    path = tmp_path / "options.json"
+    path.write_text(json.dumps({"identity_recovery_authorized": value}))
+    with pytest.raises(AddonOptionsError, match="identity_recovery_authorized"):
+        addon_options_from_path(path)

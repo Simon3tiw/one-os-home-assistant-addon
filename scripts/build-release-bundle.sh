@@ -5,7 +5,6 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 out_dir="${1:-$repo_root/dist}"
 bundle_name="one-os-edge-addon-bundle.tar.gz"
 
-rm -rf "$out_dir"
 mkdir -p "$out_dir"
 
 python3 "$repo_root/scripts/build_release_bundle.py" \

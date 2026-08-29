@@ -5,6 +5,9 @@ import hashlib
 import os
 import re
 import sqlite3
+import stat
+import subprocess
+import sys
 import threading
 from contextlib import closing
 from pathlib import Path
@@ -21,7 +24,7 @@ from test_pairing_backend import issue_client_certificate
 _INSTALLATION_ID = "00000000-0000-4000-8000-000000000002"
 _REGISTRATION_ID = "11111111-1111-4111-8111-111111111111"
 _CANDIDATE_HASH = "A" * 43
-_CSR_HASH = "B" * 43
+_CSR_HASH = base64.urlsafe_b64encode(b"\x01" * 32).rstrip(b"=").decode("ascii")
 _UPDATED_AT = "2030-01-01 00:00:00"
 
 
@@ -197,6 +200,416 @@ def test_migrate_database_refuses_mismatched_paired_legacy_identity_before_upgra
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0009",)
         assert connection.execute("SELECT * FROM edge_identity WHERE id=1").fetchone() == before
     assert not list(tmp_path.glob(".commissioning.db.*legacy-upgrade*"))
+
+
+def _create_v030_identity_missing_after_restore_shape(database: Path) -> Path:
+    identity_dir = database.parent / "identity"
+    command.upgrade(_config(database), "0009")
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute(
+            """
+            INSERT INTO edge_identity (
+              id, installation_id, status, revision, active_spki_sha256, credential_id,
+              certificate_sha256, certificate_not_after, installation_revision,
+              renewal_status, renewal_request_id, renewal_issuance_expires_at,
+              renewal_ack_expires_at, updated_at
+            ) VALUES (1, ?, 'identity_missing_after_restore', 2, NULL, NULL, NULL, NULL,
+                      NULL, NULL, NULL, NULL, NULL, ?)
+            """,
+            (_INSTALLATION_ID, _UPDATED_AT),
+        )
+        connection.execute(
+            """
+            INSERT INTO edge_pairing (
+              id, revision, mode, status, registration_request_id, session_id,
+              token_generation, candidate_spki_sha256, csr_sha256, tenant_id,
+              site_id, claim_revision, installation_revision, credential_id,
+              certificate_sha256, registration_expires_at, code_expires_at,
+              claim_expires_at, ack_expires_at, last_error, updated_at,
+              issuance_expires_at, central_session_revision
+            ) VALUES (
+              1, 2, 'initial', 'identity_missing_after_restore', ?, NULL, 0, ?, ?, NULL,
+              NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+              NULL, ?, NULL, NULL
+            )
+            """,
+            (_REGISTRATION_ID, _CANDIDATE_HASH, _CSR_HASH, _UPDATED_AT),
+        )
+        connection.commit()
+    return identity_dir
+
+
+def test_authorized_identity_missing_recovery_publishes_fresh_unpaired_head(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "commissioning.db"
+    identity_dir = _create_v030_identity_missing_after_restore_shape(database)
+    before_inode = database.stat().st_ino
+
+    migrate_database(
+        f"sqlite:///{database}",
+        identity_dir=identity_dir,
+        identity_recovery_authorized=True,
+    )
+
+    assert database.stat().st_ino != before_inode
+    with closing(sqlite3.connect(database)) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0021",)
+        assert connection.execute(
+            """
+            SELECT installation_id, status, revision, active_spki_sha256, credential_id,
+                   certificate_sha256, certificate_not_after, installation_revision,
+                   renewal_status, renewal_request_id, renewal_issuance_expires_at,
+                   renewal_ack_expires_at, telemetry_authorization_revision, lineage_id
+              FROM edge_identity WHERE id=1
+            """
+        ).fetchone() == (
+            _INSTALLATION_ID,
+            "unpaired",
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            1,
+            _INSTALLATION_ID,
+        )
+        assert connection.execute("SELECT COUNT(*) FROM edge_pairing").fetchone() == (0,)
+        assert connection.execute(
+            "SELECT actor_id, action, object_id, revision, fields_json FROM audit"
+        ).fetchone() == (
+            "system",
+            "identity_recovery_authorized",
+            "edge_identity",
+            0,
+            '["pairing_state","credential_binding","private_identity"]',
+        )
+    assert identity_dir.is_dir()
+    assert stat.S_IMODE(identity_dir.stat().st_mode) == 0o700
+    assert not tuple(identity_dir.iterdir())
+    assert not list(tmp_path.glob(".commissioning.db.*legacy-upgrade*"))
+    assert not list(tmp_path.glob(".commissioning.db.preflight-*"))
+    assert not Path(f"{database}-wal").exists()
+    assert not Path(f"{database}-shm").exists()
+
+
+def _assert_identity_missing_source_unchanged(database: Path, before_inode: int) -> None:
+    assert database.stat().st_ino == before_inode
+    with closing(sqlite3.connect(database)) as connection:
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0009",)
+        assert connection.execute(
+            "SELECT status, revision FROM edge_identity WHERE id=1"
+        ).fetchone() == ("identity_missing_after_restore", 2)
+        assert connection.execute(
+            "SELECT status, revision FROM edge_pairing WHERE id=1"
+        ).fetchone() == ("identity_missing_after_restore", 2)
+
+
+def test_identity_missing_recovery_without_authorization_is_fail_closed(tmp_path: Path) -> None:
+    database = tmp_path / "commissioning.db"
+    identity_dir = _create_v030_identity_missing_after_restore_shape(database)
+    before_inode = database.stat().st_ino
+
+    with pytest.raises(RuntimeError, match="not eligible"):
+        migrate_database(f"sqlite:///{database}", identity_dir=identity_dir)
+
+    _assert_identity_missing_source_unchanged(database, before_inode)
+
+
+def test_authorized_identity_missing_recovery_refuses_private_residue(tmp_path: Path) -> None:
+    database = tmp_path / "commissioning.db"
+    identity_dir = _create_v030_identity_missing_after_restore_shape(database)
+    identity_dir.mkdir(mode=0o700)
+    (identity_dir / "unexpected-private-material").write_bytes(b"not-a-key")
+    before_inode = database.stat().st_ino
+
+    with pytest.raises(RuntimeError, match="empty identity directory"):
+        migrate_database(
+            f"sqlite:///{database}",
+            identity_dir=identity_dir,
+            identity_recovery_authorized=True,
+        )
+
+    _assert_identity_missing_source_unchanged(database, before_inode)
+
+
+@pytest.mark.parametrize("mode", [0o755, 0o777])
+def test_authorized_identity_missing_recovery_refuses_unsafe_empty_identity_directory(
+    tmp_path: Path, mode: int
+) -> None:
+    database = tmp_path / "commissioning.db"
+    identity_dir = _create_v030_identity_missing_after_restore_shape(database)
+    identity_dir.mkdir(mode=0o700)
+    identity_dir.chmod(mode)
+    before_inode = database.stat().st_ino
+
+    with pytest.raises(RuntimeError, match="private identity directory"):
+        migrate_database(
+            f"sqlite:///{database}",
+            identity_dir=identity_dir,
+            identity_recovery_authorized=True,
+        )
+
+    _assert_identity_missing_source_unchanged(database, before_inode)
+
+
+@pytest.mark.parametrize("installation_id", ["x", "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"])
+def test_authorized_identity_missing_recovery_refuses_noncanonical_installation_id(
+    tmp_path: Path, installation_id: str
+) -> None:
+    database = tmp_path / "commissioning.db"
+    identity_dir = _create_v030_identity_missing_after_restore_shape(database)
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute(
+            "UPDATE edge_identity SET installation_id=? WHERE id=1",
+            (installation_id,),
+        )
+        connection.commit()
+    before_inode = database.stat().st_ino
+
+    with pytest.raises(RuntimeError, match="state is not eligible"):
+        migrate_database(
+            f"sqlite:///{database}",
+            identity_dir=identity_dir,
+            identity_recovery_authorized=True,
+        )
+
+    _assert_identity_missing_source_unchanged(database, before_inode)
+
+
+def test_rejected_identity_recovery_preserves_cold_wal_durable_state(tmp_path: Path) -> None:
+    database = tmp_path / "commissioning.db"
+    identity_dir = _create_v030_identity_missing_after_restore_shape(database)
+    completed = subprocess.run(  # noqa: S603 -- fixed interpreter and closed test script
+        [
+            sys.executable,
+            "-c",
+            (
+                "import os,sqlite3,sys;"
+                "c=sqlite3.connect(sys.argv[1]);"
+                "c.execute('PRAGMA journal_mode=WAL');"
+                "c.execute('PRAGMA wal_autocheckpoint=0');"
+                "c.execute(\"UPDATE edge_identity SET installation_id='x' WHERE id=1\");"
+                "c.commit();os._exit(0)"
+            ),
+            str(database),
+        ],
+        check=False,
+    )
+    assert completed.returncode == 0
+    shm = Path(f"{database}-shm")
+    shm.unlink(missing_ok=True)
+    durable_paths = (database, Path(f"{database}-wal"))
+    before = {path: (path.stat().st_ino, path.read_bytes()) for path in durable_paths}
+    expected_names = {database.name, f"{database.name}-wal"}
+
+    def sqlite_names() -> set[str]:
+        return {path.name for path in tmp_path.iterdir() if path.name.startswith(database.name)}
+
+    assert sqlite_names() == expected_names
+    with pytest.raises(RuntimeError, match="clean single-file SQLite source"):
+        migrate_database(
+            f"sqlite:///{database}",
+            identity_dir=identity_dir,
+            identity_recovery_authorized=True,
+        )
+    assert {path: (path.stat().st_ino, path.read_bytes()) for path in durable_paths} == before
+    assert sqlite_names() == expected_names
+    assert not list(tmp_path.glob(".commissioning.db.preflight-*"))
+    with closing(sqlite3.connect(database)) as connection:
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0009",)
+        assert connection.execute(
+            "SELECT installation_id, status, revision FROM edge_identity WHERE id=1"
+        ).fetchone() == ("x", "identity_missing_after_restore", 2)
+
+
+@pytest.mark.parametrize("replacement", ["mode", "symlink"])
+def test_identity_directory_change_before_publication_is_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replacement: str
+) -> None:
+    database = tmp_path / "commissioning.db"
+    identity_dir = _create_v030_identity_missing_after_restore_shape(database)
+    identity_dir.mkdir(mode=0o700)
+    before_inode = database.stat().st_ino
+    before_bytes = database.read_bytes()
+    original_fsync = legacy_upgrade._fsync_file
+
+    def interpose(path: Path) -> None:
+        original_fsync(path)
+        if replacement == "mode":
+            identity_dir.chmod(0o777)
+        else:
+            identity_dir.rmdir()
+            identity_dir.symlink_to(tmp_path)
+
+    monkeypatch.setattr(legacy_upgrade, "_fsync_file", interpose)
+    with pytest.raises(RuntimeError, match="stable private identity directory"):
+        migrate_database(
+            f"sqlite:///{database}",
+            identity_dir=identity_dir,
+            identity_recovery_authorized=True,
+        )
+
+    _assert_identity_missing_source_unchanged(database, before_inode)
+    assert database.read_bytes() == before_bytes
+    assert not Path(f"{database}-wal").exists()
+    assert not Path(f"{database}-shm").exists()
+
+
+def test_candidate_failure_precedes_source_normalization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "commissioning.db"
+    identity_dir = _create_v030_identity_missing_after_restore_shape(database)
+    before_inode = database.stat().st_ino
+    before_bytes = database.read_bytes()
+    original_upgrade = legacy_upgrade.command.upgrade
+
+    def fail_candidate(config: Config, revision: str) -> None:
+        if revision == "0014" and "legacy-upgrade-" in config.get_main_option("sqlalchemy.url"):
+            raise RuntimeError("injected candidate migration failure")
+        original_upgrade(config, revision)
+
+    monkeypatch.setattr(legacy_upgrade.command, "upgrade", fail_candidate)
+    with pytest.raises(RuntimeError, match="injected candidate migration failure"):
+        migrate_database(
+            f"sqlite:///{database}",
+            identity_dir=identity_dir,
+            identity_recovery_authorized=True,
+        )
+
+    assert database.stat().st_ino == before_inode
+    assert database.read_bytes() == before_bytes
+    assert not Path(f"{database}-wal").exists()
+    assert not Path(f"{database}-shm").exists()
+    assert not list(tmp_path.glob(".commissioning.db.preflight-*"))
+    assert not list(tmp_path.glob(".commissioning.db.legacy-upgrade-*"))
+
+
+@pytest.mark.parametrize("replacement", ["mode", "symlink"])
+def test_identity_directory_change_after_source_normalization_is_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replacement: str
+) -> None:
+    database = tmp_path / "commissioning.db"
+    identity_dir = _create_v030_identity_missing_after_restore_shape(database)
+    identity_dir.mkdir(mode=0o700)
+    before_inode = database.stat().st_ino
+    before_bytes = database.read_bytes()
+    original_checkpoint = legacy_upgrade._checkpoint_to_delete
+
+    def interpose(connection: sqlite3.Connection, label: str) -> None:
+        original_checkpoint(connection, label)
+        if label != "legacy Edge source":
+            return
+        if replacement == "mode":
+            identity_dir.chmod(0o777)
+        else:
+            identity_dir.rmdir()
+            identity_dir.symlink_to(tmp_path)
+
+    monkeypatch.setattr(legacy_upgrade, "_checkpoint_to_delete", interpose)
+    with pytest.raises(RuntimeError, match="stable private identity directory"):
+        migrate_database(
+            f"sqlite:///{database}",
+            identity_dir=identity_dir,
+            identity_recovery_authorized=True,
+        )
+
+    assert database.stat().st_ino == before_inode
+    assert database.read_bytes() == before_bytes
+    assert not Path(f"{database}-wal").exists()
+    assert not Path(f"{database}-shm").exists()
+
+
+def test_authorized_identity_missing_recovery_refuses_credential_near_miss(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "commissioning.db"
+    identity_dir = _create_v030_identity_missing_after_restore_shape(database)
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute(
+            "UPDATE edge_identity SET credential_id=? WHERE id=1",
+            ("22222222-2222-4222-8222-222222222222",),
+        )
+        connection.commit()
+    before_inode = database.stat().st_ino
+
+    with pytest.raises(RuntimeError, match="state is not eligible"):
+        migrate_database(
+            f"sqlite:///{database}",
+            identity_dir=identity_dir,
+            identity_recovery_authorized=True,
+        )
+
+    assert database.stat().st_ino == before_inode
+    with closing(sqlite3.connect(database)) as connection:
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0009",)
+        assert connection.execute(
+            "SELECT credential_id FROM edge_identity WHERE id=1"
+        ).fetchone() == ("22222222-2222-4222-8222-222222222222",)
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("registration_request_id", "x"),
+        ("registration_request_id", "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"),
+        ("candidate_spki_sha256", "x"),
+        ("candidate_spki_sha256", "!" * 43),
+        ("csr_sha256", "x"),
+        ("csr_sha256", "!" * 43),
+    ],
+)
+def test_authorized_identity_missing_recovery_refuses_noncanonical_request_binding(
+    tmp_path: Path, column: str, value: str
+) -> None:
+    database = tmp_path / "commissioning.db"
+    identity_dir = _create_v030_identity_missing_after_restore_shape(database)
+    before_inode = database.stat().st_ino
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute(
+            f"UPDATE edge_pairing SET {column}=? WHERE id=1",  # noqa: S608 -- closed test matrix
+            (value,),
+        )
+        connection.commit()
+
+    with pytest.raises(RuntimeError, match="pairing recovery state is not eligible"):
+        migrate_database(
+            f"sqlite:///{database}",
+            identity_dir=identity_dir,
+            identity_recovery_authorized=True,
+        )
+
+    _assert_identity_missing_source_unchanged(database, before_inode)
+
+
+def test_authorized_identity_missing_recovery_refuses_non_0009_revision(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "commissioning.db"
+    identity_dir = _create_v030_identity_missing_after_restore_shape(database)
+    command.upgrade(_config(database), "0010")
+    before_inode = database.stat().st_ino
+
+    with pytest.raises(RuntimeError, match="requires revision 0009"):
+        migrate_database(
+            f"sqlite:///{database}",
+            identity_dir=identity_dir,
+            identity_recovery_authorized=True,
+        )
+
+    assert database.stat().st_ino == before_inode
+    with closing(sqlite3.connect(database)) as connection:
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone() == ("0010",)
+        assert connection.execute("SELECT status FROM edge_identity WHERE id=1").fetchone() == (
+            "identity_missing_after_restore",
+        )
 
 
 def _create_v030_paired_shape(database: Path) -> Path:

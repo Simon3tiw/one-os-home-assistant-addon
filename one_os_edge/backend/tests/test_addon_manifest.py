@@ -26,11 +26,13 @@ def test_addon_backup_excludes_private_edge_identity() -> None:
         "telemetry_enabled": False,
         "telemetry_authority_enabled": False,
         "soak_probe_enabled": False,
+        "identity_recovery_authorized": False,
     }
     assert manifest["schema"] == {
         "telemetry_enabled": "bool",
         "telemetry_authority_enabled": "bool",
         "soak_probe_enabled": "bool",
+        "identity_recovery_authorized": "bool",
     }
     assert manifest["backup_exclude"] == [
         "identity",
@@ -61,6 +63,14 @@ def test_addon_runtime_reads_the_validated_telemetry_option() -> None:
     assert assignment in run_script
     assert "export ONE_OS_TELEMETRY_ENABLED" in run_script
     assert run_script.index(assignment) < run_script.index("exec uvicorn")
+
+    recovery_assignment = (
+        'ONE_OS_IDENTITY_RECOVERY_AUTHORIZED="$(python3 -m one_os_addon.addon_options '
+        '/data/options.json identity_recovery_authorized)"'
+    )
+    assert recovery_assignment in run_script
+    assert "export ONE_OS_IDENTITY_RECOVERY_AUTHORIZED" in run_script
+    assert run_script.index(recovery_assignment) < run_script.index("exec uvicorn")
 
 
 def test_addon_runtime_does_not_start_after_options_parser_failure(tmp_path: Path) -> None:
@@ -139,6 +149,12 @@ def test_release_bundle_is_byte_reproducible_and_metadata_normalized(tmp_path: P
     assert {member.gname for member in members} == {""}
     assert {member.mode for member in members if member.isdir()} == {0o755}
     assert {member.mode for member in members if member.isfile()} <= {0o644, 0o755}
+    install = next(member for member in members if member.name == "INSTALL.md")
+    assert install.mode == 0o644
+    with tarfile.open(archives[0], "r:gz") as bundle:
+        install_file = bundle.extractfile(install)
+        assert install_file is not None
+        assert install_file.read() == (REPOSITORY_ROOT / "INSTALL.md").read_bytes()
 
 
 def test_release_bundle_is_independent_of_all_source_modes(tmp_path: Path) -> None:
@@ -156,6 +172,7 @@ def test_release_bundle_is_independent_of_all_source_modes(tmp_path: Path) -> No
         ),
     )
     shutil.copy2(REPOSITORY_ROOT / "README.md", perturbed_repository / "README.md")
+    shutil.copy2(REPOSITORY_ROOT / "INSTALL.md", perturbed_repository / "INSTALL.md")
     shutil.copytree(REPOSITORY_ROOT / "scripts", perturbed_repository / "scripts")
     for path in perturbed_repository.rglob("*"):
         path.chmod(0o700 if path.is_dir() else 0o600)
@@ -172,6 +189,33 @@ def test_release_bundle_is_independent_of_all_source_modes(tmp_path: Path) -> No
     assert (baseline / "one-os-edge-addon-bundle.tar.gz").read_bytes() == (
         perturbed_output / "one-os-edge-addon-bundle.tar.gz"
     ).read_bytes()
+
+
+def test_release_bundle_preserves_unrelated_output_and_replaces_checksum_symlink(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "output"
+    output.mkdir()
+    sentinel = output / "unrelated.txt"
+    sentinel.write_text("preserve", encoding="utf-8")
+    external_bundle = tmp_path / "external-bundle.txt"
+    external_bundle.write_text("external-bundle", encoding="utf-8")
+    bundle = output / "one-os-edge-addon-bundle.tar.gz"
+    bundle.symlink_to(external_bundle)
+    external_checksum = tmp_path / "external-checksum.txt"
+    external_checksum.write_text("external-checksum", encoding="utf-8")
+    checksum = output / "one-os-edge-addon-bundle.tar.gz.sha256"
+    checksum.symlink_to(external_checksum)
+
+    subprocess.run(  # noqa: S603 - fixed repository-owned release script
+        [BUILD_RELEASE_BUNDLE, output], check=True, capture_output=True, text=True
+    )
+
+    assert sentinel.read_text(encoding="utf-8") == "preserve"
+    assert external_bundle.read_text(encoding="utf-8") == "external-bundle"
+    assert bundle.is_file() and not bundle.is_symlink()
+    assert external_checksum.read_text(encoding="utf-8") == "external-checksum"
+    assert checksum.is_file() and not checksum.is_symlink()
 
 
 def test_production_lock_is_hash_pinned_and_does_not_require_local_project_source() -> None:
@@ -218,3 +262,32 @@ def test_install_verification_requires_current_database_head() -> None:
     assert "Stop de bestaande ONE.OS Edge Connector-add-on" in install
     assert "private identity cross-store" in install
     assert "brondatabase ongewijzigd" in install
+    assert './scripts/build-release-bundle.sh "$PWD/dist-bundle"' in install
+    assert "-C /tmp/one-os-staging" not in install
+    assert "set -euo pipefail" in install
+    assert "transfer=/addons/.one_os_edge.v042.transfer" in install
+    assert "install -d -m 0700" in install
+    assert 'scp "$bundle" "$checksum"' in install
+    assert "sha256sum -c one-os-edge-addon-bundle.tar.gz.sha256" in install
+    assert 'tar -xzf one-os-edge-addon-bundle.tar.gz -C "$transfer"' in install
+    assert "new=/addons/.one_os_edge.v042.new" in install
+    assert "previous=/addons/.one_os_edge.v042.previous" in install
+    assert 'mv "$previous" "$target"' in install
+    assert 'if [ ! -e "$target" ] && [ -e "$previous" ]; then' in install
+
+
+def test_development_restore_guidance_requires_complete_identity_aware_runbook() -> None:
+    development = (REPOSITORY_ROOT / "docs/development.md").read_text(encoding="utf-8")
+    assert "Alembic owns schema revision `0021`" in development
+    assert "archive only `/data/commissioning.db`" not in development
+    assert "restart and let Alembic migrate" not in development
+    assert "Expliciet identityherstel na een cold-backuprestore" in development
+    assert "identity_recovery_authorized" in development
+
+
+def test_bundled_readme_has_no_unbundled_relative_documentation_links() -> None:
+    readme = (REPOSITORY_ROOT / "README.md").read_text(encoding="utf-8")
+    assert "`docs/reference/`" not in readme
+    assert "`docs/development.md`" not in readme
+    assert "`docs/commissioning.md`" not in readme
+    assert "[`INSTALL.md`](INSTALL.md)" in readme
